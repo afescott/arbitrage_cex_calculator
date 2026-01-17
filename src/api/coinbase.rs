@@ -4,10 +4,16 @@ use tracing::{error, info, warn};
 
 const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
 
-pub struct CoinbaseClient;
+pub struct CoinbaseClient {
+    tx: tokio::sync::mpsc::Sender<u64>,
+}
 
 impl CoinbaseClient {
-    pub async fn listen_btc_usdt() {
+    pub fn new(tx: tokio::sync::mpsc::Sender<u64>) -> Self {
+        CoinbaseClient { tx }
+    }
+    
+    pub async fn listen_btc_usdt(&self) {
         info!("[Coinbase] Connecting to BTC/USDT ticker stream...");
         
         match connect_async(COINBASE_WS_URL).await {
@@ -32,7 +38,7 @@ impl CoinbaseClient {
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
-                            if let Err(e) = Self::handle_message(&text).await {
+                            if let Err(e) = self.handle_message(&text).await {
                                 warn!("[Coinbase] Error handling message: {}", e);
                             }
                         }
@@ -57,7 +63,7 @@ impl CoinbaseClient {
         }
     }
     
-    async fn handle_message(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Basic validation - prevent injection attacks
         if text.len() > 100_000 {
             return Err("Message too large".into());
@@ -77,11 +83,16 @@ impl CoinbaseClient {
         // Handle ticker updates
         if let Some(msg_type) = ticker.get("type").and_then(|t| t.as_str()) {
             if msg_type == "ticker" {
-                if let (Some(product_id), Some(price)) = (
+                if let (Some(product_id), Some(price_str)) = (
                     ticker.get("product_id").and_then(|p| p.as_str()),
                     ticker.get("price").and_then(|p| p.as_str()),
                 ) {
-                    info!("[Coinbase] {}: ${}", product_id, price);
+                    // Coinbase price is a decimal string, convert to u64 (cents)
+                    if let Ok(price_f64) = price_str.parse::<f64>() {
+                        let price = (price_f64 * 100.0) as u64;
+                        self.tx.send(price).await.ok();
+                        info!("[Coinbase] {}: ${}", product_id, price_str);
+                    }
                 }
             }
         }

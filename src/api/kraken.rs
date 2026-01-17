@@ -4,10 +4,16 @@ use tracing::{error, info, warn};
 
 const KRAKEN_WS_URL: &str = "wss://ws.kraken.com";
 
-pub struct KrakenClient;
+pub struct KrakenClient {
+    tx: tokio::sync::mpsc::Sender<u64>,
+}
 
 impl KrakenClient {
-    pub async fn listen_btc_usdt() {
+    pub fn new(tx: tokio::sync::mpsc::Sender<u64>) -> Self {
+        KrakenClient { tx }
+    }
+    
+    pub async fn listen_btc_usdt(&self) {
         info!("[Kraken] Connecting to BTC/USDT ticker stream...");
         
         match connect_async(KRAKEN_WS_URL).await {
@@ -34,7 +40,7 @@ impl KrakenClient {
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
-                            if let Err(e) = Self::handle_message(&text).await {
+                            if let Err(e) = self.handle_message(&text).await {
                                 warn!("[Kraken] Error handling message: {}", e);
                             }
                         }
@@ -59,7 +65,7 @@ impl KrakenClient {
         }
     }
     
-    async fn handle_message(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Basic validation - prevent injection attacks
         if text.len() > 100_000 {
             return Err("Message too large".into());
@@ -77,13 +83,16 @@ impl KrakenClient {
         // Handle ticker data (array format)
         if let Some(array) = value.as_array() {
             if array.len() >= 4 {
-                if let Some(price) = array[1].as_object()
+                if let Some(price_str) = array[1].as_object()
                     .and_then(|o| o.get("c"))
                     .and_then(|c| c.as_array())
                     .and_then(|a| a.get(0))
                     .and_then(|v| v.as_str())
                 {
-                    info!("[Kraken] XBT/USD: ${}", price);
+                    if let Ok(price) = price_str.parse::<u64>() {
+                        self.tx.send(price).await.ok();
+                        info!("[Kraken] XBT/USD: ${}", price);
+                    }
                 }
             }
         }

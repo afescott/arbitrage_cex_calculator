@@ -14,18 +14,21 @@ async fn main() {
 
     info!("Starting low-latency order book aggregator...");
     info!("Monitoring BTC/USDT pair across multiple exchanges");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
 
     // Spawn tasks for each exchange
-    let binance_handle = tokio::spawn(async {
-        BinanceClient::listen_btc_usdt().await;
+    let binance_tx = tx.clone();
+    let binance_handle = tokio::spawn(async move {
+        BinanceClient::new(binance_tx).listen_btc_usdt().await;
     });
 
-    let kraken_handle = tokio::spawn(async {
-        KrakenClient::listen_btc_usdt().await;
+    let kraken_tx = tx.clone();
+    let kraken_handle = tokio::spawn(async move {
+        KrakenClient::new(kraken_tx).listen_btc_usdt().await;
     });
 
-    let coinbase_handle = tokio::spawn(async {
-        CoinbaseClient::listen_btc_usdt().await;
+    let coinbase_handle = tokio::spawn(async move {
+        CoinbaseClient::new(tx).listen_btc_usdt().await;
     });
 
     // Wait for all tasks (they run indefinitely)

@@ -4,22 +4,27 @@ use tracing::{error, info, warn};
 
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws/btcusdt@ticker";
 
-pub struct BinanceClient;
+pub struct BinanceClient {
+    tx: tokio::sync::mpsc::Sender<u64>,
+}
 
 impl BinanceClient {
-    pub async fn listen_btc_usdt() {
+    pub fn new(tx: tokio::sync::mpsc::Sender<u64>) -> Self {
+        BinanceClient { tx }
+    }
+    pub async fn listen_btc_usdt(&self) {
         info!("[Binance] Connecting to BTC/USDT ticker stream...");
-        
+
         match connect_async(BINANCE_WS_URL).await {
             Ok((ws_stream, _)) => {
                 info!("[Binance] Connected successfully");
                 let (_write, mut read) = ws_stream.split();
-                
+
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
                             // Parse and handle ticker data
-                            if let Err(e) = Self::handle_message(&text).await {
+                            if let Err(e) = self.handle_message(&text).await {
                                 warn!("[Binance] Error handling message: {}", e);
                             }
                         }
@@ -43,24 +48,25 @@ impl BinanceClient {
             }
         }
     }
-    
-    async fn handle_message(text: &str) -> Result<(), Box<dyn std::error::Error>> {
+
+    async fn handle_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Basic validation - prevent injection attacks
         if text.len() > 100_000 {
             return Err("Message too large".into());
         }
-        
+
         // Parse ticker data
         let ticker: serde_json::Value = serde_json::from_str(text)?;
-        
+
         if let (Some(symbol), Some(price)) = (
             ticker.get("s").and_then(|s| s.as_str()),
             ticker.get("c").and_then(|c| c.as_str()),
         ) {
+            let price = price.parse::<u64>()?;
+            self.tx.send(price).await.ok(); // Placeholder for sending data to aggregator
             info!("[Binance] {}: ${}", symbol, price);
         }
-        
+
         Ok(())
     }
 }
-
