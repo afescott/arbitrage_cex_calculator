@@ -1,6 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
+use crate::util::parse_price_cents;
 
 const KRAKEN_WS_URL: &str = "wss://ws.kraken.com";
 
@@ -89,9 +90,8 @@ impl KrakenClient {
                     .and_then(|a| a.get(0))
                     .and_then(|v| v.as_str())
                 {
-                    // Kraken price is a decimal string, convert to u64 (cents)
-                    if let Ok(price_f64) = price_str.parse::<f64>() {
-                        let price = (price_f64 * 100.0) as u64;
+                    // Fast u64 parsing - avoids f64 overhead for low-latency
+                    if let Some(price) = parse_price_cents(price_str) {
                         self.tx.send(price).await.ok();
                         info!("[Kraken] XBT/USD: ${}", price_str);
                     }

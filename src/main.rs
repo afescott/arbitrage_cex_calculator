@@ -1,4 +1,5 @@
 mod api;
+mod util;
 
 use api::{BinanceClient, CoinbaseClient, KrakenClient};
 use tracing::{info, Level};
