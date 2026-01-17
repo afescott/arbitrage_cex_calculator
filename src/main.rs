@@ -31,6 +31,13 @@ async fn main() {
         CoinbaseClient::new(tx).listen_btc_usdt().await;
     });
 
+    let aggregator_handle = tokio::spawn(async move {
+        while let Some(price) = rx.recv().await {
+            info!("Aggregated BTC/USDT price: {}", price);
+            // Here you could implement more complex aggregation logic
+        }
+    });
+
     // Wait for all tasks (they run indefinitely)
     tokio::select! {
         _ = binance_handle => {
@@ -41,6 +48,9 @@ async fn main() {
         }
         _ = coinbase_handle => {
             info!("Coinbase task ended");
+        }
+        _ = aggregator_handle => {
+            info!("Aggregator task ended");
         }
     }
 }

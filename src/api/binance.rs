@@ -58,13 +58,16 @@ impl BinanceClient {
         // Parse ticker data
         let ticker: serde_json::Value = serde_json::from_str(text)?;
 
-        if let (Some(symbol), Some(price)) = (
+        if let (Some(symbol), Some(price_str)) = (
             ticker.get("s").and_then(|s| s.as_str()),
             ticker.get("c").and_then(|c| c.as_str()),
         ) {
-            let price = price.parse::<u64>()?;
-            self.tx.send(price).await.ok(); // Placeholder for sending data to aggregator
-            info!("[Binance] {}: ${}", symbol, price);
+            // Binance price is a decimal string, convert to u64 (cents)
+            if let Ok(price_f64) = price_str.parse::<f64>() {
+                let price = (price_f64 * 100.0) as u64;
+                self.tx.send(price).await.ok();
+                info!("[Binance] {}: ${}", symbol, price_str);
+            }
         }
 
         Ok(())

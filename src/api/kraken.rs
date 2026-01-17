@@ -89,9 +89,11 @@ impl KrakenClient {
                     .and_then(|a| a.get(0))
                     .and_then(|v| v.as_str())
                 {
-                    if let Ok(price) = price_str.parse::<u64>() {
+                    // Kraken price is a decimal string, convert to u64 (cents)
+                    if let Ok(price_f64) = price_str.parse::<f64>() {
+                        let price = (price_f64 * 100.0) as u64;
                         self.tx.send(price).await.ok();
-                        info!("[Kraken] XBT/USD: ${}", price);
+                        info!("[Kraken] XBT/USD: ${}", price_str);
                     }
                 }
             }
