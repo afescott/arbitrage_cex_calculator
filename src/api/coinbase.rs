@@ -1,16 +1,16 @@
+use crate::{api::ExchangePrice, util::parse_price_cents};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
-use crate::util::parse_price_cents;
 
 const COINBASE_WS_URL: &str = "wss://ws-feed.exchange.coinbase.com";
 
 pub struct CoinbaseClient {
-    tx: tokio::sync::mpsc::Sender<u64>,
+    tx: tokio::sync::mpsc::Sender<ExchangePrice>,
 }
 
 impl CoinbaseClient {
-    pub fn new(tx: tokio::sync::mpsc::Sender<u64>) -> Self {
+    pub fn new(tx: tokio::sync::mpsc::Sender<ExchangePrice>) -> Self {
         CoinbaseClient { tx }
     }
     
@@ -90,7 +90,7 @@ impl CoinbaseClient {
                 ) {
                     // Fast u64 parsing - avoids f64 overhead for low-latency
                     if let Some(price) = parse_price_cents(price_str) {
-                        self.tx.send(price).await.ok();
+                        self.tx.send(ExchangePrice::Coinbase(price)).await.ok();
                         info!("[Coinbase] {}: ${}", product_id, price_str);
                     }
                 }

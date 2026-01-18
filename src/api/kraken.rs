@@ -1,26 +1,26 @@
+use crate::{api::ExchangePrice, util::parse_price_cents};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
-use crate::util::parse_price_cents;
 
 const KRAKEN_WS_URL: &str = "wss://ws.kraken.com";
 
 pub struct KrakenClient {
-    tx: tokio::sync::mpsc::Sender<u64>,
+    tx: tokio::sync::mpsc::Sender<ExchangePrice>,
 }
 
 impl KrakenClient {
-    pub fn new(tx: tokio::sync::mpsc::Sender<u64>) -> Self {
+    pub fn new(tx: tokio::sync::mpsc::Sender<ExchangePrice>) -> Self {
         KrakenClient { tx }
     }
-    
+
     pub async fn listen_btc_usdt(&self) {
         info!("[Kraken] Connecting to BTC/USDT ticker stream...");
-        
+
         match connect_async(KRAKEN_WS_URL).await {
             Ok((mut ws_stream, _)) => {
                 info!("[Kraken] Connected successfully");
-                
+
                 // Subscribe to XBT/USD ticker (Kraken uses XBT for Bitcoin)
                 let subscribe_msg = serde_json::json!({
                     "event": "subscribe",
@@ -29,15 +29,18 @@ impl KrakenClient {
                         "name": "ticker"
                     }
                 });
-                
+
                 // Send subscription message
-                if let Err(e) = ws_stream.send(Message::Text(subscribe_msg.to_string())).await {
+                if let Err(e) = ws_stream
+                    .send(Message::Text(subscribe_msg.to_string()))
+                    .await
+                {
                     error!("[Kraken] Failed to send subscription: {}", e);
                     return;
                 }
-                
+
                 let (_write, mut read) = ws_stream.split();
-                
+
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
@@ -65,26 +68,27 @@ impl KrakenClient {
             }
         }
     }
-    
+
     async fn handle_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
         // Basic validation - prevent injection attacks
         if text.len() > 100_000 {
             return Err("Message too large".into());
         }
-        
+
         // Parse Kraken message (can be array or object)
         let value: serde_json::Value = serde_json::from_str(text)?;
-        
+
         // Handle subscription confirmation
         if let Some(event) = value.get("event").and_then(|e| e.as_str()) {
             info!("[Kraken] Event: {}", event);
             return Ok(());
         }
-        
+
         // Handle ticker data (array format)
         if let Some(array) = value.as_array() {
             if array.len() >= 4 {
-                if let Some(price_str) = array[1].as_object()
+                if let Some(price_str) = array[1]
+                    .as_object()
                     .and_then(|o| o.get("c"))
                     .and_then(|c| c.as_array())
                     .and_then(|a| a.get(0))
@@ -92,14 +96,13 @@ impl KrakenClient {
                 {
                     // Fast u64 parsing - avoids f64 overhead for low-latency
                     if let Some(price) = parse_price_cents(price_str) {
-                        self.tx.send(price).await.ok();
+                        self.tx.send(ExchangePrice::Kraken(price)).await.ok();
                         info!("[Kraken] XBT/USD: ${}", price_str);
                     }
                 }
             }
         }
-        
+
         Ok(())
     }
 }
-

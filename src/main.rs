@@ -1,7 +1,7 @@
 mod api;
 mod util;
 
-use api::{BinanceClient, CoinbaseClient, KrakenClient};
+use api::{BinanceClient, CoinbaseClient, ExchangePrice, KrakenClient};
 use tracing::{info, Level};
 use tracing_subscriber;
 
@@ -15,7 +15,7 @@ async fn main() {
 
     info!("Starting low-latency order book aggregator...");
     info!("Monitoring BTC/USDT pair across multiple exchanges");
-    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangePrice>(100);
 
     // Spawn tasks for each exchange
     let binance_tx = tx.clone();
