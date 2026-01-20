@@ -1,5 +1,6 @@
 use crate::{api::ExchangePrice, util::parse_price_cents};
 use futures_util::{SinkExt, StreamExt};
+use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
@@ -39,7 +40,9 @@ impl CoinbaseClient {
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
-                            if let Err(e) = self.handle_message(&text).await {
+                            // Capture timestamp immediately when message received
+                            let received_at = Instant::now();
+                            if let Err(e) = self.handle_message(&text, received_at).await {
                                 warn!("[Coinbase] Error handling message: {}", e);
                             }
                         }
@@ -64,7 +67,11 @@ impl CoinbaseClient {
         }
     }
     
-    async fn handle_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_message(
+        &self,
+        text: &str,
+        received_at: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Basic validation - prevent injection attacks
         if text.len() > 100_000 {
             return Err("Message too large".into());
@@ -90,7 +97,20 @@ impl CoinbaseClient {
                 ) {
                     // Fast u64 parsing - avoids f64 overhead for low-latency
                     if let Some(price) = parse_price_cents(price_str) {
-                        self.tx.send(ExchangePrice::Coinbase(price)).await.ok();
+                        // Parse exchange timestamp (time field = ISO 8601, convert to ms)
+                        // Coinbase provides "time" field but it's ISO 8601 string, not ms
+                        // For now, we'll capture receive time and can parse exchange time later if needed
+                        // Coinbase provides "time" field as ISO 8601 string
+                        // For now, we'll use None (full implementation would parse ISO 8601 to Unix ms)
+                        // The received_at timestamp is sufficient for latency measurement
+                        let exchange_timestamp = None;
+                        
+                        // Include both exchange timestamp (for ordering) and receive timestamp (for latency)
+                        self.tx.send(ExchangePrice::Coinbase {
+                            price,
+                            exchange_timestamp, // Coinbase uses ISO 8601, would need parsing
+                            received_at,
+                        }).await.ok();
                         info!("[Coinbase] {}: ${}", product_id, price_str);
                     }
                 }

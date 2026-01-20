@@ -1,5 +1,6 @@
 use crate::{api::ExchangePrice, util::parse_price_cents};
 use futures_util::{SinkExt, StreamExt};
+use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
@@ -24,8 +25,9 @@ impl BinanceClient {
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
-                            // Parse and handle ticker data
-                            if let Err(e) = self.handle_message(&text).await {
+                            // Capture timestamp immediately when message received
+                            let received_at = Instant::now();
+                            if let Err(e) = self.handle_message(&text, received_at).await {
                                 warn!("[Binance] Error handling message: {}", e);
                             }
                         }
@@ -50,7 +52,11 @@ impl BinanceClient {
         }
     }
 
-    async fn handle_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_message(
+        &self,
+        text: &str,
+        received_at: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Basic validation - prevent injection attacks
         if text.len() > 100_000 {
             return Err("Message too large".into());
@@ -65,7 +71,17 @@ impl BinanceClient {
         ) {
             // Fast u64 parsing - avoids f64 overhead for low-latency
             if let Some(price) = parse_price_cents(price_str) {
-                self.tx.send(ExchangePrice::Binance(price)).await.ok();
+                // Parse exchange timestamp (E field = event time in milliseconds)
+                let exchange_timestamp = ticker
+                    .get("E")
+                    .and_then(|e| e.as_u64());
+                
+                // Include both exchange timestamp (for ordering) and receive timestamp (for latency)
+                self.tx.send(ExchangePrice::Binance {
+                    price,
+                    exchange_timestamp,
+                    received_at,
+                }).await.ok();
                 info!("[Binance] {}: ${}", symbol, price_str);
             }
         }

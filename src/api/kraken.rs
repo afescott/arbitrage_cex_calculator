@@ -1,5 +1,6 @@
 use crate::{api::ExchangePrice, util::parse_price_cents};
 use futures_util::{SinkExt, StreamExt};
+use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
@@ -44,7 +45,9 @@ impl KrakenClient {
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
-                            if let Err(e) = self.handle_message(&text).await {
+                            // Capture timestamp immediately when message received
+                            let received_at = Instant::now();
+                            if let Err(e) = self.handle_message(&text, received_at).await {
                                 warn!("[Kraken] Error handling message: {}", e);
                             }
                         }
@@ -69,7 +72,11 @@ impl KrakenClient {
         }
     }
 
-    async fn handle_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn handle_message(
+        &self,
+        text: &str,
+        received_at: Instant,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Basic validation - prevent injection attacks
         if text.len() > 100_000 {
             return Err("Message too large".into());
@@ -85,19 +92,27 @@ impl KrakenClient {
         }
 
         // Handle ticker data (array format)
+        // Kraken format: [channelID, {data}, channelName, pair]
         if let Some(array) = value.as_array() {
             if array.len() >= 4 {
-                if let Some(price_str) = array[1]
-                    .as_object()
-                    .and_then(|o| o.get("c"))
-                    .and_then(|c| c.as_array())
-                    .and_then(|a| a.get(0))
-                    .and_then(|v| v.as_str())
-                {
-                    // Fast u64 parsing - avoids f64 overhead for low-latency
-                    if let Some(price) = parse_price_cents(price_str) {
-                        self.tx.send(ExchangePrice::Kraken(price)).await.ok();
-                        info!("[Kraken] XBT/USD: ${}", price_str);
+                if let Some(ticker_data) = array[1].as_object() {
+                    // Price is in ticker_data["c"][0]
+                    if let Some(price_str) = ticker_data
+                        .get("c")
+                        .and_then(|c| c.as_array())
+                        .and_then(|a| a.get(0))
+                        .and_then(|v| v.as_str())
+                    {
+                        // Fast u64 parsing - avoids f64 overhead for low-latency
+                        if let Some(price) = parse_price_cents(price_str) {
+                            // Kraken doesn't provide explicit timestamp in ticker, but we capture receive time
+                            self.tx.send(ExchangePrice::Kraken {
+                                price,
+                                exchange_timestamp: None, // Kraken ticker doesn't include timestamp
+                                received_at,
+                            }).await.ok();
+                            info!("[Kraken] XBT/USD: ${}", price_str);
+                        }
                     }
                 }
             }
