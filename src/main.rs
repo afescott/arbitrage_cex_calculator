@@ -1,4 +1,5 @@
 mod api;
+mod orderbook;
 mod util;
 
 use api::{BinanceClient, CoinbaseClient, ExchangePrice, KrakenClient};
