@@ -91,10 +91,10 @@ impl OrderBook {
                 // Handle price updates
                 if let Err(e) = self.update_order(
                     pricelevel::OrderUpdate::UpdatePrice {
-                        order_id: OrderId(order_id),
+                        order_id: OrderId::Uuid(order_id),
                         new_price,
                     },
-                    OrderId(order_id),
+                    OrderId::Uuid(order_id),
                 ) {
                     return Err(anyhow!(
                         "Failed to update order price ({:?}): {}",
@@ -110,10 +110,10 @@ impl OrderBook {
                 // Handle quantity updates
                 if let Err(e) = self.update_order(
                     pricelevel::OrderUpdate::UpdateQuantity {
-                        order_id: OrderId(order_id),
+                        order_id: OrderId::Uuid(order_id),
                         new_quantity,
                     },
-                    OrderId(order_id),
+                    OrderId::Uuid(order_id),
                 ) {
                     return Err(anyhow!("Failed to update order quantity: {}", e));
                 }
@@ -126,11 +126,11 @@ impl OrderBook {
                 // Handle price and quantity updates
                 if let Err(e) = self.update_order(
                     pricelevel::OrderUpdate::UpdatePriceAndQuantity {
-                        order_id: OrderId(order_id),
+                        order_id: OrderId::Uuid(order_id),
                         new_price,
                         new_quantity,
                     },
-                    OrderId(order_id),
+                    OrderId::Uuid(order_id),
                 ) {
                     return Err(anyhow!(
                         "Failed to update order price ({:?}) and quantity: {}",
@@ -143,9 +143,9 @@ impl OrderBook {
                 // Handle order cancellations
                 if let Err(e) = self.update_order(
                     pricelevel::OrderUpdate::Cancel {
-                        order_id: OrderId(order_id),
+                        order_id: OrderId::Uuid(order_id),
                     },
-                    OrderId(order_id),
+                    OrderId::Uuid(order_id),
                 ) {
                     return Err(anyhow!("Failed to cancel order: {}", e));
                 }
@@ -162,15 +162,16 @@ impl OrderBook {
         side: Side,
     ) -> Result<OrderId> {
         let timestamp = chrono::Utc::now().timestamp_millis() as u64;
-        let order_id = pricelevel::OrderType::Standard {
+        let order_id = pricelevel::OrderType::Standard::<()> {
             id,
             price,
             quantity,
             side,
             timestamp,
             time_in_force: pricelevel::TimeInForce::Gtc,
+            extra_fields: (),
         };
-        self.add_order(order_id)
+        self.add_order::<()>(order_id)
             .map_err(|err| anyhow!("Error adding limit order: {:?}", err))?;
 
         // After adding a limit order, retry unfilled market orders
@@ -302,7 +303,7 @@ impl OrderBook {
             Err(anyhow!("No matching orders found"))
         } */
     }
-    pub fn add_order(&self, mut order: OrderType) -> Result<OrderId> {
+    pub fn add_order<T>(&self, mut order: OrderType<()>) -> Result<OrderId> {
         trace!(
             "Order book {}: Adding order {} at price {}",
             self.symbol,

@@ -18,12 +18,7 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
-# pricelevel - Update this with the correct path or git URL
-# Examples:
-# pricelevel = { path = "../pricelevel" }  # If local crate
-# pricelevel = { git = "https://github.com/user/pricelevel" }  # If git dependency
-# pricelevel = "0.1"  # If on crates.io
-pricelevel = { path = "../pricelevel" }  # TODO: Update with correct path
+pricelevel = "0.4.2"
 
 [profile.release]
 lto = true

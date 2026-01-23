@@ -208,7 +208,7 @@ mod test {
 
         order_book
             .submit_market_order(
-                pricelevel::OrderId(Uuid::new_v4()),
+                pricelevel::OrderId::Uuid(Uuid::new_v4()),
                 1,
                 pricelevel::Side::Sell,
             )
@@ -223,7 +223,7 @@ mod test {
 
         order_book
             .submit_market_order(
-                pricelevel::OrderId(Uuid::new_v4()),
+                pricelevel::OrderId::Uuid(Uuid::new_v4()),
                 4,
                 pricelevel::Side::Sell,
             )
