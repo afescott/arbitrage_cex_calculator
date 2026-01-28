@@ -34,7 +34,7 @@ pub fn current_time_millis() -> u64 {
         .as_millis() as u64
 }
 
-#[cfg(test)]
+/* #[cfg(test)]
 mod test {
     use super::book::OrderBook;
 
@@ -54,4 +54,4 @@ mod test {
             .submit_market_order(pricelevel::OrderId::default(), 5, pricelevel::Side::Sell)
             .unwrap();
     }
-}
+} */

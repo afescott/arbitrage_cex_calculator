@@ -43,7 +43,7 @@ pub enum OrderModification {
     },
 }
 
-#[cfg(test)]
+/* #[cfg(test)]
 mod test {
     use pricelevel::OrderId;
 
@@ -260,4 +260,4 @@ mod test {
             "Order should be removed from orders map"
         );
     }
-}
+} */

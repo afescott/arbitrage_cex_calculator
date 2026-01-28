@@ -30,7 +30,7 @@ pub enum FillType {
     Full(Vec<OrderId>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExchangePriceList {
     Binance,
     Coinbase,
@@ -63,7 +63,7 @@ impl OrderBook {
         side: Side,
         quantity: u64,
     ) {
-        let entry = match side {
+        match side {
             Side::Buy => {
                 let key = (price, exchange);
                 let mut price_level = self
@@ -71,7 +71,7 @@ impl OrderBook {
                     .entry(key)
                     .or_insert_with(BTreeMap::new);
                 let entry = price_level.entry(price).or_insert(0);
-                *entry += quantity
+                *entry += quantity;
             }
             Side::Sell => {
                 let key = (price, exchange);
@@ -80,15 +80,9 @@ impl OrderBook {
                     .entry(key)
                     .or_insert_with(BTreeMap::new);
                 let entry = price_level.entry(price).or_insert(0);
-                *entry += quantity
+                *entry += quantity;
             }
-        };
-        /* if entry as u64 < quantity {
-            println!(
-                "Overflow occurred when adding quantity: {} at price: {} on side: {:?}",
-                quantity, price, side
-            );
-        } */
+        }
     }
 }
 
@@ -96,84 +90,111 @@ impl OrderBook {
 mod test {
     use std::{sync::Arc, time::Duration};
 
-    use pricelevel::OrderId;
+    use pricelevel::Side;
     use tokio::sync::mpsc::channel;
-    use uuid::Uuid;
 
-    use crate::orderbook::book::OrderBook;
+    use crate::orderbook::book::{ExchangePriceList, OrderBook};
 
     #[test]
-    fn test_order_book_add_limit_order() {
+    fn test_add_exchange_price_level_different_exchanges() {
         let order_book = OrderBook::new("BTC/USD".to_string());
 
-        let order_id = OrderId::default();
-        let result = order_book.add_to_limit_order(order_id, 100, 1, pricelevel::Side::Buy);
-        assert!(result.is_ok());
+        // Add same price to different exchanges - should be separate
+        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 10);
+        order_book.add_exchange_price_level(50000, ExchangePriceList::Coinbase, Side::Buy, 20);
 
-        assert!(order_book.bids.contains_key(&100));
-        assert!(order_book.asks.is_empty());
+        let binance_key = (50000, ExchangePriceList::Binance);
+        let coinbase_key = (50000, ExchangePriceList::Coinbase);
 
-        order_book
-            .submit_market_order(
-                pricelevel::OrderId::Uuid(Uuid::new_v4()),
-                1,
-                pricelevel::Side::Sell,
-            )
+        assert!(order_book
+            .exchange_bids_price_level
+            .contains_key(&binance_key));
+        assert!(order_book
+            .exchange_bids_price_level
+            .contains_key(&coinbase_key));
+
+        let binance_level = order_book
+            .exchange_bids_price_level
+            .get(&binance_key)
+            .unwrap();
+        let coinbase_level = order_book
+            .exchange_bids_price_level
+            .get(&coinbase_key)
             .unwrap();
 
-        //Bid successfully removed
-        assert!(!order_book.bids.contains_key(&100));
+        assert_eq!(binance_level.get(&50000), Some(&10));
+        assert_eq!(coinbase_level.get(&50000), Some(&20));
+    }
 
-        order_book
-            .add_to_limit_order(order_id, 50, 6, pricelevel::Side::Buy)
-            .unwrap();
+    #[test]
+    fn test_add_exchange_price_level_bid() {
+        let order_book = OrderBook::new("BTC/USD".to_string());
 
-        order_book
-            .submit_market_order(
-                pricelevel::OrderId::Uuid(Uuid::new_v4()),
-                4,
-                pricelevel::Side::Sell,
-            )
-            .unwrap();
+        // Add bid for Binance
+        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 10);
 
-        assert!(order_book.bids.contains_key(&50));
-        //remaining quantity should be 2
-        assert_eq!(order_book.bids.get(&50).unwrap().total_quantity(), 2);
+        let key = (50000, ExchangePriceList::Binance);
+        assert!(order_book.exchange_bids_price_level.contains_key(&key));
+
+        let price_level = order_book.exchange_bids_price_level.get(&key).unwrap();
+        assert_eq!(price_level.get(&50000), Some(&10));
+    }
+
+    #[test]
+    fn test_add_exchange_price_level_ask() {
+        let order_book = OrderBook::new("BTC/USD".to_string());
+
+        // Add ask for Coinbase
+        order_book.add_exchange_price_level(50100, ExchangePriceList::Coinbase, Side::Sell, 5);
+
+        let key = (50100, ExchangePriceList::Coinbase);
+        assert!(order_book.exchange_asks_price_level.contains_key(&key));
+
+        let price_level = order_book.exchange_asks_price_level.get(&key).unwrap();
+        assert_eq!(price_level.get(&50100), Some(&5));
+    }
+
+    #[test]
+    fn test_add_exchange_price_level_quantity_accumulation() {
+        let order_book = OrderBook::new("BTC/USD".to_string());
+
+        // Add same price level multiple times - quantities should accumulate
+        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 10);
+        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 5);
+        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 3);
+
+        let key = (50000, ExchangePriceList::Binance);
+        let price_level = order_book.exchange_bids_price_level.get(&key).unwrap();
+        assert_eq!(price_level.get(&50000), Some(&18)); // 10 + 5 + 3
     }
 
     #[tokio::test]
-    async fn test_order_book_submit_market_order() {
+    async fn test_add_exchange_price_level_concurrent() {
         let order_book = Arc::new(OrderBook::new("ETH/USD".to_string()));
         let book_1 = Arc::clone(&order_book);
         let book_2 = Arc::clone(&order_book);
         let (tx, mut rx) = channel::<u64>(1);
-        let order_id = OrderId::default();
-        let task = tokio::spawn(async move {
-            book_1
-                .add_to_limit_order(order_id, 2000, 13, pricelevel::Side::Sell)
-                .unwrap();
 
-            assert_eq!(
-                book_1.asks.iter().next().unwrap().value().total_quantity(),
-                13
-            );
+        let task = tokio::spawn(async move {
+            book_1.add_exchange_price_level(2000, ExchangePriceList::Binance, Side::Sell, 13);
+
+            let key = (2000, ExchangePriceList::Binance);
+            let price_level = book_1.exchange_asks_price_level.get(&key).unwrap();
+            let quantity = price_level.get(&2000).unwrap();
 
             tokio::time::sleep(Duration::from_secs(1)).await;
 
-            tx.send(book_1.asks.iter().next().unwrap().value().total_quantity())
-                .await
-                .unwrap();
+            tx.send(*quantity).await.unwrap();
         });
 
         let task_2 = tokio::spawn(async move {
-            book_2
-                .add_to_limit_order(order_id, 2000, 13, pricelevel::Side::Sell)
-                .unwrap();
+            book_2.add_exchange_price_level(2000, ExchangePriceList::Binance, Side::Sell, 13);
         });
 
         tokio::join!(task, task_2);
 
         while let Some(val) = rx.recv().await {
+            // Quantities should accumulate: 13 + 13 = 26
             assert_eq!(val, 26);
         }
     }
