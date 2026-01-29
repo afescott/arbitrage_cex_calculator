@@ -45,10 +45,6 @@ pub struct OrderBook {
     pub exchange_bids_price_level: DashMap<(u64, ExchangePriceList), BTreeMap<u64, u64>>,
 
     pub exchange_asks_price_level: DashMap<(u64, ExchangePriceList), BTreeMap<u64, u64>>,
-
-    pub cached_best_bid: DashMap<ExchangePriceList, AtomicU64>,
-
-    pub cached_best_ask: DashMap<ExchangePriceList, AtomicU64>,
 }
 
 impl OrderBook {
@@ -57,21 +53,81 @@ impl OrderBook {
             symbol,
             exchange_bids_price_level: DashMap::new(),
             exchange_asks_price_level: DashMap::new(),
-            cached_best_bid: DashMap::new(),
-            cached_best_ask: DashMap::new(),
         }
     }
 
-    pub fn best_bid(&self, exchange: ExchangePriceList) -> Option<u64> {
-        let best_bid = self.cached_best_bid.get(&exchange)?;
+  pub fn best_bid(&self) -> Option<u64> {
+        let cached = self
+            .cached_best_bid
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cached > 0 {
+            // Verify the cached price still has orders
+            if let Some(price_level) = self.bids.get(&cached) {
+                if price_level.order_count() > 0 {
+                    return Some(cached);
+                }
+            }
+        }
 
-        Some(best_bid.load(std::sync::atomic::Ordering::Relaxed))
+        // Fallback to full scan and update cache
+        let mut best_price = None;
+        for item in self.bids.iter() {
+            let price = *item.key();
+            let price_level = item.value();
+
+            if price_level.order_count() > 0
+                && (best_price.is_none() || price > best_price.unwrap())
+            {
+                best_price = Some(price);
+            }
+        }
+
+        if let Some(price) = best_price {
+            self.cached_best_bid
+                .store(price, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.cached_best_bid
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        best_price
     }
 
-    pub fn best_ask(&self, exchange: ExchangePriceList) -> Option<u64> {
-        let best_ask = self.cached_best_ask.get(&exchange)?;
+    pub fn best_ask(&self) -> Option<u64> {
+        let cached = self
+            .cached_best_ask
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cached < u64::MAX {
+            // Verify the cached price still has orders
+            if let Some(price_level) = self.asks.get(&cached) {
+                if price_level.order_count() > 0 {
+                    return Some(cached);
+                }
+            }
+        }
 
-        Some(best_ask.load(std::sync::atomic::Ordering::Relaxed))
+        // Fallback to full scan and update cache
+        let mut lowest_ask = None;
+        for item in self.asks.iter() {
+            let price = *item.key();
+            let price_level = item.value();
+
+            if price_level.order_count() > 0
+                && (lowest_ask.is_none() || price < lowest_ask.unwrap())
+            {
+                lowest_ask = Some(price);
+            }
+        }
+
+        if let Some(price) = lowest_ask {
+            self.cached_best_ask
+                .store(price, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.cached_best_ask
+                .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        lowest_ask
     }
 
     pub fn add_exchange_price_level(
