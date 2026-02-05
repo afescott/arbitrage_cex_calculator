@@ -4,7 +4,7 @@ use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
-const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws/btcusdt@ticker";
+const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws/btcusdt@depth20@100ms";
 
 pub struct BinanceClient {
     tx: tokio::sync::mpsc::Sender<ExchangePrice>,
@@ -15,7 +15,7 @@ impl BinanceClient {
         BinanceClient { tx }
     }
     pub async fn listen_btc_usdt(&self) {
-        info!("[Binance] Connecting to BTC/USDT ticker stream...");
+        info!("[Binance] Connecting to BTC/USDT orderbook depth stream...");
 
         match connect_async(BINANCE_WS_URL).await {
             Ok((ws_stream, _)) => {

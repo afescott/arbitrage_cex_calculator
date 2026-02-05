@@ -16,18 +16,18 @@ impl KrakenClient {
     }
 
     pub async fn listen_btc_usdt(&self) {
-        info!("[Kraken] Connecting to BTC/USDT ticker stream...");
+        info!("[Kraken] Connecting to BTC/USDT orderbook depth stream...");
 
         match connect_async(KRAKEN_WS_URL).await {
             Ok((mut ws_stream, _)) => {
                 info!("[Kraken] Connected successfully");
 
-                // Subscribe to XBT/USD ticker (Kraken uses XBT for Bitcoin)
+                // Subscribe to XBT/USD orderbook (Kraken uses XBT for Bitcoin)
                 let subscribe_msg = serde_json::json!({
                     "event": "subscribe",
                     "pair": ["XBT/USD"],
                     "subscription": {
-                        "name": "ticker"
+                        "name": "book"
                     }
                 });
 

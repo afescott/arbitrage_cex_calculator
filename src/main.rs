@@ -10,6 +10,9 @@ use crate::orderbook::book::OrderBook;
 
 #[tokio::main]
 async fn main() {
+    run("BTC/USDT".to_string()).await;
+}
+async fn run(order_book_name: String) {
     // Initialize tracing for tokio-console compatibility
     tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
@@ -46,7 +49,7 @@ async fn main() {
             );
         }
     }); */
-    let orderbook = OrderBook::new("BTC/USDT".to_string());
+    let orderbook = OrderBook::new(order_book_name.to_string());
     let aggregator_handle = tokio::spawn(async move {
         while let Some(price) = rx.recv().await {
             match price {
@@ -55,23 +58,55 @@ async fn main() {
                     exchange_timestamp,
                     received_at,
                 } => {
-                    /* orderbook.add_exchange_price_level(
-                        "Binance".to_string(),
-                        pricelevel::Side::Buy,
+                    orderbook.check_for_immediate_purchase(
                         price,
-                        1,
-                    ); */
+                        orderbook::book::Exchange::Binance,
+                        pricelevel::Side::Buy,
+                        unimplemented!(),
+                    );
+                    orderbook.add_exchange_price_level(
+                        price,
+                        orderbook::book::Exchange::Binance,
+                        pricelevel::Side::Buy,
+                        unimplemented!(),
+                    );
                 }
                 ExchangePrice::Kraken {
                     price,
                     exchange_timestamp,
                     received_at,
-                } => todo!(),
+                } => {
+                    orderbook.check_for_immediate_purchase(
+                        price,
+                        orderbook::book::Exchange::Kraken,
+                        pricelevel::Side::Buy,
+                        unimplemented!(),
+                    );
+                    orderbook.add_exchange_price_level(
+                        price,
+                        orderbook::book::Exchange::Kraken,
+                        pricelevel::Side::Buy,
+                        unimplemented!(),
+                    );
+                }
                 ExchangePrice::Coinbase {
                     price,
                     exchange_timestamp,
                     received_at,
-                } => todo!(),
+                } => {
+                    orderbook.check_for_immediate_purchase(
+                        price,
+                        orderbook::book::Exchange::Coinbase,
+                        pricelevel::Side::Buy,
+                        unimplemented!(),
+                    );
+                    orderbook.add_exchange_price_level(
+                        price,
+                        orderbook::book::Exchange::Coinbase,
+                        pricelevel::Side::Buy,
+                        unimplemented!(),
+                    );
+                }
             }
             info!(
                 "Aggregated BTC/USDT price: {}, exchange timestamp: {:?}",
@@ -98,4 +133,11 @@ async fn main() {
             info!("Aggregator task ended");
         }
     }
+}
+
+#[cfg(test)]
+mod test {
+
+    #[tokio::test]
+    async fn test_full_run() {}
 }

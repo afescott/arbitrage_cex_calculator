@@ -31,9 +31,10 @@ pub enum FillType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ExchangePriceList {
+pub enum Exchange {
     Binance,
     Coinbase,
+    Kraken,
 }
 
 /// The OrderBook manages a collection of price levels for both bid and ask sides.
@@ -42,13 +43,21 @@ pub struct OrderBook {
     /// The symbol or identifier for this order book
     pub symbol: String,
     // BTreeMap keeps prices sorted (bids: highest first, asks: lowest first) and maps price → quantity.
-    pub exchange_bids_price_level: DashMap<(u64, ExchangePriceList), BTreeMap<u64, u64>>,
+    pub exchange_bids_price_level: DashMap<(u64, Exchange), BTreeMap<u64, u64>>,
 
-    pub exchange_asks_price_level: DashMap<(u64, ExchangePriceList), BTreeMap<u64, u64>>,
+    pub exchange_asks_price_level: DashMap<(u64, Exchange), BTreeMap<u64, u64>>,
 
-    pub cached_best_bid: DashMap<ExchangePriceList, AtomicU64>,
+    pub cached_best_bid: DashMap<Exchange, AtomicU64>,
 
-    pub cached_best_ask: DashMap<ExchangePriceList, AtomicU64>,
+    pub cached_best_ask: DashMap<Exchange, AtomicU64>,
+
+    /// Best bid across all exchanges. Returns None if no data available.
+    /// The tuple contains (exchange, price), where price of 0 means no data.
+    pub best_bid_all_exchanges: (Exchange, AtomicU64),
+
+    /// Best ask across all exchanges. Returns None if no data available.
+    /// The tuple contains (exchange, price), where price of 0 means no data.
+    pub best_ask_all_exchanges: (Exchange, AtomicU64),
 }
 
 impl OrderBook {
@@ -59,25 +68,83 @@ impl OrderBook {
             exchange_asks_price_level: DashMap::new(),
             cached_best_bid: DashMap::new(),
             cached_best_ask: DashMap::new(),
+            best_bid_all_exchanges: (Exchange::Binance, AtomicU64::new(0)),
+            best_ask_all_exchanges: (Exchange::Binance, AtomicU64::new(0)),
         }
     }
 
-    pub fn best_bid(&self, exchange: ExchangePriceList) -> Option<u64> {
+    pub fn best_bid(&self, exchange: Exchange) -> Option<u64> {
         let best_bid = self.cached_best_bid.get(&exchange)?;
 
         Some(best_bid.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    pub fn best_ask(&self, exchange: ExchangePriceList) -> Option<u64> {
+    pub fn best_ask(&self, exchange: Exchange) -> Option<u64> {
         let best_ask = self.cached_best_ask.get(&exchange)?;
 
         Some(best_ask.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// Returns the best bid price across all exchanges, or None if no data is available.
+    /// A price of 0 is treated as "no data" since it's invalid for trading.
+    pub fn best_bid_all_exchanges(&self) -> Option<(u64, Exchange)> {
+        let price = self
+            .best_bid_all_exchanges
+            .1
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if price == 0 {
+            None
+        } else {
+            Some((price, self.best_bid_all_exchanges.0))
+        }
+    }
+
+    /// Returns the best ask price across all exchanges, or None if no data is available.
+    /// A price of 0 is treated as "no data" since it's invalid for trading.
+    pub fn best_ask_all_exchanges(&self) -> Option<(u64, Exchange)> {
+        let price = self
+            .best_ask_all_exchanges
+            .1
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if price == 0 {
+            None
+        } else {
+            Some((price, self.best_ask_all_exchanges.0))
+        }
+    }
+
+    pub fn check_for_immediate_purchase(
+        &self,
+        price: u64,
+        exchange: Exchange,
+        side: Side,
+        quantity: u64,
+    ) {
+        match side {
+            Side::Buy => {
+                let val = self.best_ask_all_exchanges();
+                if let Some(best_ask_exchange) = val {
+                    if best_ask_exchange.1 != exchange && best_ask_exchange.0 < price {
+                        println!("Best ask: {:?} from exchange: {:?}, is better higher than our bid: {:?}, from exchange: {:?}",
+                            best_ask_exchange.0, best_ask_exchange.1, exchange, price);
+                    }
+                }
+            }
+            Side::Sell => {
+                let val = self.best_bid_all_exchanges();
+                if let Some(best_bid_exchange) = val {
+                    if best_bid_exchange.1 != exchange && best_bid_exchange.0 > price {}
+                    println!("Best bid: {:?} from exchange: {:?}, is better lower than our ask: {:?}, from exchange: {:?}",
+                            best_bid_exchange.0, best_bid_exchange.1, exchange, price);
+                }
+            }
+        }
+    }
+
     pub fn add_exchange_price_level(
         &self,
         price: u64,
-        exchange: ExchangePriceList,
+        exchange: Exchange,
         side: Side,
         quantity: u64,
     ) {

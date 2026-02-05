@@ -16,17 +16,17 @@ impl CoinbaseClient {
     }
     
     pub async fn listen_btc_usdt(&self) {
-        info!("[Coinbase] Connecting to BTC/USDT ticker stream...");
+        info!("[Coinbase] Connecting to BTC/USDT orderbook depth stream...");
         
         match connect_async(COINBASE_WS_URL).await {
             Ok((mut ws_stream, _)) => {
                 info!("[Coinbase] Connected successfully");
                 
-                // Subscribe to BTC-USD ticker (Coinbase uses BTC-USD, not BTC-USDT)
+                // Subscribe to BTC-USD level2 orderbook (Coinbase uses BTC-USD, not BTC-USDT)
                 let subscribe_msg = serde_json::json!({
                     "type": "subscribe",
                     "product_ids": ["BTC-USD"],
-                    "channels": ["ticker"]
+                    "channels": ["level2"]
                 });
                 
                 // Send subscription message
