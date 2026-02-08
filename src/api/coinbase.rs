@@ -77,41 +77,100 @@ impl CoinbaseClient {
             return Err("Message too large".into());
         }
         
-        // Parse ticker data
-        let ticker: serde_json::Value = serde_json::from_str(text)?;
+        // Parse level2 update data
+        let update: serde_json::Value = serde_json::from_str(text)?;
         
         // Handle subscription confirmation
-        if let Some(msg_type) = ticker.get("type").and_then(|t| t.as_str()) {
+        if let Some(msg_type) = update.get("type").and_then(|t| t.as_str()) {
             if msg_type == "subscriptions" {
                 info!("[Coinbase] Subscription confirmed");
                 return Ok(());
             }
-        }
-        
-        // Handle ticker updates
-        if let Some(msg_type) = ticker.get("type").and_then(|t| t.as_str()) {
-            if msg_type == "ticker" {
-                if let (Some(product_id), Some(price_str)) = (
-                    ticker.get("product_id").and_then(|p| p.as_str()),
-                    ticker.get("price").and_then(|p| p.as_str()),
-                ) {
-                    // Fast u64 parsing - avoids f64 overhead for low-latency
-                    if let Some(price) = parse_price_cents(price_str) {
-                        // Parse exchange timestamp (time field = ISO 8601, convert to ms)
-                        // Coinbase provides "time" field but it's ISO 8601 string, not ms
-                        // For now, we'll capture receive time and can parse exchange time later if needed
-                        // Coinbase provides "time" field as ISO 8601 string
-                        // For now, we'll use None (full implementation would parse ISO 8601 to Unix ms)
-                        // The received_at timestamp is sufficient for latency measurement
-                        let exchange_timestamp = None;
-                        
-                        // Include both exchange timestamp (for ordering) and receive timestamp (for latency)
-                        self.tx.send(ExchangePrice::Coinbase {
-                            price,
-                            exchange_timestamp, // Coinbase uses ISO 8601, would need parsing
-                            received_at,
-                        }).await.ok();
-                        info!("[Coinbase] {}: ${}", product_id, price_str);
+            
+            // Handle level2 snapshot (initial state)
+            if msg_type == "snapshot" {
+                if let Some(bids) = update.get("bids").and_then(|b| b.as_array()) {
+                    for bid in bids {
+                        if let Some(bid_array) = bid.as_array() {
+                            if bid_array.len() >= 2 {
+                                if let (Some(price_str), Some(size_str)) = (
+                                    bid_array[0].as_str(),
+                                    bid_array[1].as_str(),
+                                ) {
+                                    if let (Some(price), Some(quantity)) = (
+                                        parse_price_cents(price_str),
+                                        crate::util::parse_quantity_smallest_unit(size_str, 8),
+                                    ) {
+                                        self.tx.send(ExchangePrice::Coinbase {
+                                            price,
+                                            quantity,
+                                            exchange_timestamp: None,
+                                            received_at,
+                                        }).await.ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if let Some(asks) = update.get("asks").and_then(|a| a.as_array()) {
+                    for ask in asks {
+                        if let Some(ask_array) = ask.as_array() {
+                            if ask_array.len() >= 2 {
+                                if let (Some(price_str), Some(size_str)) = (
+                                    ask_array[0].as_str(),
+                                    ask_array[1].as_str(),
+                                ) {
+                                    if let (Some(price), Some(quantity)) = (
+                                        parse_price_cents(price_str),
+                                        crate::util::parse_quantity_smallest_unit(size_str, 8),
+                                    ) {
+                                        self.tx.send(ExchangePrice::Coinbase {
+                                            price,
+                                            quantity,
+                                            exchange_timestamp: None,
+                                            received_at,
+                                        }).await.ok();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            
+            // Handle level2 updates (incremental changes)
+            if msg_type == "l2update" {
+                if let Some(changes) = update.get("changes").and_then(|c| c.as_array()) {
+                    for change in changes {
+                        if let Some(change_array) = change.as_array() {
+                            if change_array.len() >= 3 {
+                                if let (Some(side_str), Some(price_str), Some(size_str)) = (
+                                    change_array[0].as_str(),
+                                    change_array[1].as_str(),
+                                    change_array[2].as_str(),
+                                ) {
+                                    // Skip if size is "0" (removal)
+                                    if size_str == "0" {
+                                        continue;
+                                    }
+                                    
+                                    if let (Some(price), Some(quantity)) = (
+                                        parse_price_cents(price_str),
+                                        crate::util::parse_quantity_smallest_unit(size_str, 8),
+                                    ) {
+                                        self.tx.send(ExchangePrice::Coinbase {
+                                            price,
+                                            quantity,
+                                            exchange_timestamp: None,
+                                            received_at,
+                                        }).await.ok();
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

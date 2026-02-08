@@ -62,27 +62,66 @@ impl BinanceClient {
             return Err("Message too large".into());
         }
 
-        // Parse ticker data
-        let ticker: serde_json::Value = serde_json::from_str(text)?;
+        // Parse depth update data
+        let depth: serde_json::Value = serde_json::from_str(text)?;
 
-        if let (Some(symbol), Some(price_str)) = (
-            ticker.get("s").and_then(|s| s.as_str()),
-            ticker.get("c").and_then(|c| c.as_str()),
-        ) {
-            // Fast u64 parsing - avoids f64 overhead for low-latency
-            if let Some(price) = parse_price_cents(price_str) {
-                // Parse exchange timestamp (E field = event time in milliseconds)
-                let exchange_timestamp = ticker
-                    .get("E")
-                    .and_then(|e| e.as_u64());
-                
-                // Include both exchange timestamp (for ordering) and receive timestamp (for latency)
-                self.tx.send(ExchangePrice::Binance {
-                    price,
-                    exchange_timestamp,
-                    received_at,
-                }).await.ok();
-                info!("[Binance] {}: ${}", symbol, price_str);
+        // Binance depth stream format: { "e": "depthUpdate", "bids": [[price, qty], ...], "asks": [[price, qty], ...] }
+        if depth.get("e").and_then(|e| e.as_str()) != Some("depthUpdate") {
+            // Skip non-depth messages
+            return Ok(());
+        }
+
+        let exchange_timestamp = depth.get("E").and_then(|e| e.as_u64());
+
+        // Process bids (we want to buy at these prices)
+        if let Some(bids) = depth.get("bids").and_then(|b| b.as_array()) {
+            for bid in bids {
+                if let Some(bid_array) = bid.as_array() {
+                    if bid_array.len() >= 2 {
+                        if let (Some(price_str), Some(qty_str)) = (
+                            bid_array[0].as_str(),
+                            bid_array[1].as_str(),
+                        ) {
+                            if let (Some(price), Some(quantity)) = (
+                                parse_price_cents(price_str),
+                                crate::util::parse_quantity_smallest_unit(qty_str, 8), // BTC has 8 decimals
+                            ) {
+                                self.tx.send(ExchangePrice::Binance {
+                                    price,
+                                    quantity,
+                                    exchange_timestamp,
+                                    received_at,
+                                }).await.ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Process asks (we want to sell at these prices)
+        if let Some(asks) = depth.get("asks").and_then(|a| a.as_array()) {
+            for ask in asks {
+                if let Some(ask_array) = ask.as_array() {
+                    if ask_array.len() >= 2 {
+                        if let (Some(price_str), Some(qty_str)) = (
+                            ask_array[0].as_str(),
+                            ask_array[1].as_str(),
+                        ) {
+                            if let (Some(price), Some(quantity)) = (
+                                parse_price_cents(price_str),
+                                crate::util::parse_quantity_smallest_unit(qty_str, 8),
+                            ) {
+                                self.tx.send(ExchangePrice::Binance {
+                                    price,
+                                    quantity,
+                                    exchange_timestamp,
+                                    received_at,
+                                }).await.ok();
+                            }
+                        }
+                    }
+                }
             }
         }
 

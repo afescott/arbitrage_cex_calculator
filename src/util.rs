@@ -1,3 +1,35 @@
+/// Parse quantity string to smallest unit (e.g., satoshis for BTC)
+/// Quantities can have many decimal places, so we parse as integer with scaling
+/// 
+/// Examples:
+/// - "1.5" -> 150000000 (satoshis, assuming 8 decimals)
+/// - "0.001" -> 100000 (satoshis)
+/// - "100" -> 10000000000 (satoshis)
+pub fn parse_quantity_smallest_unit(s: &str, decimals: u32) -> Option<u64> {
+    let scale = 10_u64.pow(decimals);
+    match s.find('.') {
+        Some(dot_pos) => {
+            let integer_part = s[..dot_pos].parse::<u64>().ok()?;
+            let fractional_str = &s[dot_pos + 1..];
+            
+            // Pad or truncate fractional part to match decimals
+            let fractional = if fractional_str.len() <= decimals as usize {
+                // Pad with zeros
+                let padded = format!("{}{}", fractional_str, "0".repeat(decimals as usize - fractional_str.len()));
+                padded.parse::<u64>().ok()?
+            } else {
+                // Truncate
+                fractional_str[..decimals as usize].parse::<u64>().ok()?
+            };
+            
+            Some(integer_part * scale + fractional)
+        }
+        None => {
+            s.parse::<u64>().ok().map(|v| v * scale)
+        }
+    }
+}
+
 /// Fast decimal string to cents (u64) parser for low-latency applications
 /// Avoids f64 parsing overhead and floating-point arithmetic
 /// 

@@ -178,18 +178,18 @@ mod test {
     use pricelevel::Side;
     use tokio::sync::mpsc::channel;
 
-    use crate::orderbook::book::{ExchangePriceList, OrderBook};
+    use crate::orderbook::book::{Exchange, OrderBook};
 
     #[test]
     fn test_add_exchange_price_level_different_exchanges() {
         let order_book = OrderBook::new("BTC/USD".to_string());
 
         // Add same price to different exchanges - should be separate
-        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 10);
-        order_book.add_exchange_price_level(50000, ExchangePriceList::Coinbase, Side::Buy, 20);
+        order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 10);
+        order_book.add_exchange_price_level(50000, Exchange::Coinbase, Side::Buy, 20);
 
-        let binance_key = (50000, ExchangePriceList::Binance);
-        let coinbase_key = (50000, ExchangePriceList::Coinbase);
+        let binance_key = (50000, Exchange::Binance);
+        let coinbase_key = (50000, Exchange::Coinbase);
 
         assert!(order_book
             .exchange_bids_price_level
@@ -216,9 +216,9 @@ mod test {
         let order_book = OrderBook::new("BTC/USD".to_string());
 
         // Add bid for Binance
-        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 10);
+        order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 10);
 
-        let key = (50000, ExchangePriceList::Binance);
+        let key = (50000, Exchange::Binance);
         assert!(order_book.exchange_bids_price_level.contains_key(&key));
 
         let price_level = order_book.exchange_bids_price_level.get(&key).unwrap();
@@ -230,9 +230,9 @@ mod test {
         let order_book = OrderBook::new("BTC/USD".to_string());
 
         // Add ask for Coinbase
-        order_book.add_exchange_price_level(50100, ExchangePriceList::Coinbase, Side::Sell, 5);
+        order_book.add_exchange_price_level(50100, Exchange::Coinbase, Side::Sell, 5);
 
-        let key = (50100, ExchangePriceList::Coinbase);
+        let key = (50100, Exchange::Coinbase);
         assert!(order_book.exchange_asks_price_level.contains_key(&key));
 
         let price_level = order_book.exchange_asks_price_level.get(&key).unwrap();
@@ -244,11 +244,11 @@ mod test {
         let order_book = OrderBook::new("BTC/USD".to_string());
 
         // Add same price level multiple times - quantities should accumulate
-        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 10);
-        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 5);
-        order_book.add_exchange_price_level(50000, ExchangePriceList::Binance, Side::Buy, 3);
+        order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 10);
+        order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 5);
+        order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 3);
 
-        let key = (50000, ExchangePriceList::Binance);
+        let key = (50000, Exchange::Binance);
         let price_level = order_book.exchange_bids_price_level.get(&key).unwrap();
         assert_eq!(price_level.get(&50000), Some(&18)); // 10 + 5 + 3
     }
@@ -261,9 +261,9 @@ mod test {
         let (tx, mut rx) = channel::<u64>(1);
 
         let task = tokio::spawn(async move {
-            book_1.add_exchange_price_level(2000, ExchangePriceList::Binance, Side::Sell, 13);
+            book_1.add_exchange_price_level(2000, Exchange::Binance, Side::Sell, 13);
 
-            let key = (2000, ExchangePriceList::Binance);
+            let key = (2000, Exchange::Binance);
             let price_level = book_1.exchange_asks_price_level.get(&key).unwrap();
             let quantity = price_level.get(&2000).unwrap();
 
@@ -273,7 +273,7 @@ mod test {
         });
 
         let task_2 = tokio::spawn(async move {
-            book_2.add_exchange_price_level(2000, ExchangePriceList::Binance, Side::Sell, 13);
+            book_2.add_exchange_price_level(2000, Exchange::Binance, Side::Sell, 13);
         });
 
         tokio::join!(task, task_2);

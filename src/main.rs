@@ -1,4 +1,5 @@
 mod api;
+mod calculation;
 mod orderbook;
 mod util;
 
@@ -55,56 +56,59 @@ async fn run(order_book_name: String) {
             match price {
                 ExchangePrice::Binance {
                     price,
-                    exchange_timestamp,
-                    received_at,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
                 } => {
                     orderbook.check_for_immediate_purchase(
                         price,
                         orderbook::book::Exchange::Binance,
                         pricelevel::Side::Buy,
-                        unimplemented!(),
+                        quantity,
                     );
                     orderbook.add_exchange_price_level(
                         price,
                         orderbook::book::Exchange::Binance,
                         pricelevel::Side::Buy,
-                        unimplemented!(),
+                        quantity,
                     );
                 }
                 ExchangePrice::Kraken {
                     price,
-                    exchange_timestamp,
-                    received_at,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
                 } => {
                     orderbook.check_for_immediate_purchase(
                         price,
                         orderbook::book::Exchange::Kraken,
                         pricelevel::Side::Buy,
-                        unimplemented!(),
+                        quantity,
                     );
                     orderbook.add_exchange_price_level(
                         price,
                         orderbook::book::Exchange::Kraken,
                         pricelevel::Side::Buy,
-                        unimplemented!(),
+                        quantity,
                     );
                 }
                 ExchangePrice::Coinbase {
                     price,
-                    exchange_timestamp,
-                    received_at,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
                 } => {
                     orderbook.check_for_immediate_purchase(
                         price,
                         orderbook::book::Exchange::Coinbase,
                         pricelevel::Side::Buy,
-                        unimplemented!(),
+                        quantity,
                     );
                     orderbook.add_exchange_price_level(
                         price,
                         orderbook::book::Exchange::Coinbase,
                         pricelevel::Side::Buy,
-                        unimplemented!(),
+                        quantity,
                     );
                 }
             }

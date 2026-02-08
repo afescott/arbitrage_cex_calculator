@@ -20,20 +20,23 @@ pub enum Exchange {
     Coinbase,
 }
 
-// ExchangePrice includes both exchange timestamp (if available) and receive timestamp
+// ExchangePrice includes price, quantity, exchange timestamp, and receive timestamp
 pub enum ExchangePrice {
     Binance {
         price: u64,
+        quantity: u64,
         exchange_timestamp: Option<u64>, // From exchange (E field, milliseconds)
         received_at: Instant,           // When we received it
     },
     Kraken {
         price: u64,
+        quantity: u64,
         exchange_timestamp: Option<u64>, // From exchange (timestamp field)
         received_at: Instant,
     },
     Coinbase {
         price: u64,
+        quantity: u64,
         exchange_timestamp: Option<u64>, // From exchange (time field)
         received_at: Instant,
     },
@@ -45,6 +48,14 @@ impl ExchangePrice {
             ExchangePrice::Binance { price, .. } => *price,
             ExchangePrice::Kraken { price, .. } => *price,
             ExchangePrice::Coinbase { price, .. } => *price,
+        }
+    }
+
+    pub fn quantity(&self) -> u64 {
+        match self {
+            ExchangePrice::Binance { quantity, .. } => *quantity,
+            ExchangePrice::Kraken { quantity, .. } => *quantity,
+            ExchangePrice::Coinbase { quantity, .. } => *quantity,
         }
     }
 

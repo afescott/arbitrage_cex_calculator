@@ -91,27 +91,81 @@ impl KrakenClient {
             return Ok(());
         }
 
-        // Handle ticker data (array format)
+        // Handle book data (array format)
         // Kraken format: [channelID, {data}, channelName, pair]
+        // Book data: { "bids": [["price", "volume", "timestamp"], ...], "asks": [...] }
         if let Some(array) = value.as_array() {
             if array.len() >= 4 {
-                if let Some(ticker_data) = array[1].as_object() {
-                    // Price is in ticker_data["c"][0]
-                    if let Some(price_str) = ticker_data
-                        .get("c")
-                        .and_then(|c| c.as_array())
-                        .and_then(|a| a.get(0))
-                        .and_then(|v| v.as_str())
-                    {
-                        // Fast u64 parsing - avoids f64 overhead for low-latency
-                        if let Some(price) = parse_price_cents(price_str) {
-                            // Kraken doesn't provide explicit timestamp in ticker, but we capture receive time
-                            self.tx.send(ExchangePrice::Kraken {
-                                price,
-                                exchange_timestamp: None, // Kraken ticker doesn't include timestamp
-                                received_at,
-                            }).await.ok();
-                            info!("[Kraken] XBT/USD: ${}", price_str);
+                if let Some(book_data) = array[1].as_object() {
+                    // Process bids
+                    if let Some(bids) = book_data.get("bids").and_then(|b| b.as_array()) {
+                        for bid in bids {
+                            if let Some(bid_array) = bid.as_array() {
+                                if bid_array.len() >= 2 {
+                                    if let (Some(price_str), Some(volume_str)) = (
+                                        bid_array[0].as_str(),
+                                        bid_array[1].as_str(),
+                                    ) {
+                                        // Skip if volume is "0.00000000" (removal)
+                                        if volume_str == "0.00000000" || volume_str == "0" {
+                                            continue;
+                                        }
+                                        
+                                        if let (Some(price), Some(quantity)) = (
+                                            parse_price_cents(price_str),
+                                            crate::util::parse_quantity_smallest_unit(volume_str, 8),
+                                        ) {
+                                            // Parse timestamp if available (3rd element)
+                                            let exchange_timestamp = bid_array.get(2)
+                                                .and_then(|t| t.as_str())
+                                                .and_then(|s| s.parse::<u64>().ok());
+                                            
+                                            self.tx.send(ExchangePrice::Kraken {
+                                                price,
+                                                quantity,
+                                                exchange_timestamp,
+                                                received_at,
+                                            }).await.ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Process asks
+                    if let Some(asks) = book_data.get("asks").and_then(|a| a.as_array()) {
+                        for ask in asks {
+                            if let Some(ask_array) = ask.as_array() {
+                                if ask_array.len() >= 2 {
+                                    if let (Some(price_str), Some(volume_str)) = (
+                                        ask_array[0].as_str(),
+                                        ask_array[1].as_str(),
+                                    ) {
+                                        // Skip if volume is "0.00000000" (removal)
+                                        if volume_str == "0.00000000" || volume_str == "0" {
+                                            continue;
+                                        }
+                                        
+                                        if let (Some(price), Some(quantity)) = (
+                                            parse_price_cents(price_str),
+                                            crate::util::parse_quantity_smallest_unit(volume_str, 8),
+                                        ) {
+                                            // Parse timestamp if available (3rd element)
+                                            let exchange_timestamp = ask_array.get(2)
+                                                .and_then(|t| t.as_str())
+                                                .and_then(|s| s.parse::<u64>().ok());
+                                            
+                                            self.tx.send(ExchangePrice::Kraken {
+                                                price,
+                                                quantity,
+                                                exchange_timestamp,
+                                                received_at,
+                                            }).await.ok();
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
