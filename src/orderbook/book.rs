@@ -16,7 +16,7 @@ use dashmap::DashMap;
 use pricelevel::{OrderId, PriceLevel, Side, UuidGenerator};
 use std::{
     collections::BTreeMap,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{atomic::AtomicU64, Arc, RwLock},
 };
 use uuid::Uuid;
 
@@ -43,9 +43,9 @@ pub struct OrderBook {
     /// The symbol or identifier for this order book
     pub symbol: String,
     // BTreeMap keeps prices sorted (bids: highest first, asks: lowest first) and maps price → quantity.
-    pub exchange_bids_price_level: DashMap<(u64, Exchange), BTreeMap<u64, u64>>,
-
-    pub exchange_asks_price_level: DashMap<(u64, Exchange), BTreeMap<u64, u64>>,
+    pub exchange_bids_price_level: DashMap<Exchange, Arc<RwLock<BTreeMap<u64, u64>>>>,
+    // One BTreeMap per exchange, sorted by price,
+    pub exchange_asks_price_level: DashMap<Exchange, Arc<RwLock<BTreeMap<u64, u64>>>>,
 
     pub cached_best_bid: DashMap<Exchange, AtomicU64>,
 
@@ -113,6 +113,24 @@ impl OrderBook {
         }
     }
 
+    /// Check if the orderbook has sufficient depth (minimum number of price levels)
+    /// Returns true if depth is established, false otherwise
+    fn has_sufficient_depth(&self, exchange: Exchange, min_levels: usize) -> bool {
+        let bids_depth = self
+            .exchange_bids_price_level
+            .get(&exchange)
+            .and_then(|map| map.value().read().ok().map(|guard| guard.len()))
+            .unwrap_or(0);
+
+        let asks_depth = self
+            .exchange_asks_price_level
+            .get(&exchange)
+            .and_then(|map| map.value().read().ok().map(|guard| guard.len()))
+            .unwrap_or(0);
+
+        bids_depth >= min_levels && asks_depth >= min_levels
+    }
+
     pub fn check_for_immediate_purchase(
         &self,
         price: u64,
@@ -120,6 +138,12 @@ impl OrderBook {
         side: Side,
         quantity: u64,
     ) {
+        // Only proceed if orderbook has established depth (at least 3 price levels on each side)
+        const MIN_DEPTH_LEVELS: usize = 3;
+        if !self.has_sufficient_depth(exchange, MIN_DEPTH_LEVELS) {
+            return;
+        }
+
         match side {
             Side::Buy => {
                 let val = self.best_ask_all_exchanges();
@@ -151,20 +175,28 @@ impl OrderBook {
         match side {
             Side::Buy => {
                 let key = (price, exchange);
-                let mut price_level = self
+                let price_level = self
                     .exchange_bids_price_level
-                    .entry(key)
-                    .or_insert_with(BTreeMap::new);
-                let entry = price_level.entry(price).or_insert(0);
+                    .entry(key.1)
+                    .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())));
+                let mut guard = match price_level.value().write() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let entry = guard.entry(price).or_insert(0);
                 *entry += quantity;
             }
             Side::Sell => {
                 let key = (price, exchange);
-                let mut price_level = self
+                let price_level = self
                     .exchange_asks_price_level
-                    .entry(key)
-                    .or_insert_with(BTreeMap::new);
-                let entry = price_level.entry(price).or_insert(0);
+                    .entry(key.1)
+                    .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())));
+                let mut guard = match price_level.value().write() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let entry = guard.entry(price).or_insert(0);
                 *entry += quantity;
             }
         }
