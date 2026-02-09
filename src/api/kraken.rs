@@ -94,11 +94,34 @@ impl KrakenClient {
         // Handle book data (array format)
         // Kraken format: [channelID, {data}, channelName, pair]
         // Book data: { "bids": [["price", "volume", "timestamp"], ...], "asks": [...] }
+        
+        // Debug: log first book message structure
+        static FIRST_BOOK_MSG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        if FIRST_BOOK_MSG.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(array) = value.as_array() {
+                info!("[Kraken] First book message array length: {}", array.len());
+                if array.len() >= 2 {
+                    if let Some(book_data) = array[1].as_object() {
+                        info!("[Kraken] Book data keys: {:?}", book_data.keys().collect::<Vec<_>>());
+                        info!("[Kraken] Has 'bs' (bids snapshot): {}", book_data.get("bs").is_some());
+                        info!("[Kraken] Has 'b' (bids update): {}", book_data.get("b").is_some());
+                        info!("[Kraken] Has 'as' (asks snapshot): {}", book_data.get("as").is_some());
+                        info!("[Kraken] Has 'a' (asks update): {}", book_data.get("a").is_some());
+                    }
+                }
+            }
+        }
+        
         if let Some(array) = value.as_array() {
             if array.len() >= 4 {
                 if let Some(book_data) = array[1].as_object() {
-                    // Process bids
-                    if let Some(bids) = book_data.get("bids").and_then(|b| b.as_array()) {
+                    // Process bids - Kraken uses "bs" (bids snapshot) or "b" (bids update)
+                    let bids_opt = book_data.get("bs")
+                        .or_else(|| book_data.get("b"))
+                        .and_then(|b| b.as_array());
+                    
+                    if let Some(bids) = bids_opt {
+                        info!("[Kraken] Processing {} bids", bids.len());
                         for bid in bids {
                             if let Some(bid_array) = bid.as_array() {
                                 if bid_array.len() >= 2 {
@@ -106,15 +129,17 @@ impl KrakenClient {
                                         bid_array[0].as_str(),
                                         bid_array[1].as_str(),
                                     ) {
+                                        println!("[Kraken] Bid: price_str={}, volume_str={}", price_str, volume_str);
+                                        
                                         // Skip if volume is "0.00000000" (removal)
                                         if volume_str == "0.00000000" || volume_str == "0" {
                                             continue;
                                         }
                                         
-                                        if let (Some(price), Some(quantity)) = (
-                                            parse_price_cents(price_str),
-                                            crate::util::parse_quantity_smallest_unit(volume_str, 8),
-                                        ) {
+                                        let price_opt = parse_price_cents(price_str);
+                                        let quantity_opt = crate::util::parse_quantity_smallest_unit(volume_str, 8);
+                                        
+                                        if let (Some(price), Some(quantity)) = (price_opt, quantity_opt) {
                                             // Parse timestamp if available (3rd element)
                                             let exchange_timestamp = bid_array.get(2)
                                                 .and_then(|t| t.as_str())
@@ -133,8 +158,13 @@ impl KrakenClient {
                         }
                     }
                     
-                    // Process asks
-                    if let Some(asks) = book_data.get("asks").and_then(|a| a.as_array()) {
+                    // Process asks - Kraken uses "as" (asks snapshot) or "a" (asks update)
+                    let asks_opt = book_data.get("as")
+                        .or_else(|| book_data.get("a"))
+                        .and_then(|a| a.as_array());
+                    
+                    if let Some(asks) = asks_opt {
+                        info!("[Kraken] Processing {} asks", asks.len());
                         for ask in asks {
                             if let Some(ask_array) = ask.as_array() {
                                 if ask_array.len() >= 2 {
@@ -142,15 +172,17 @@ impl KrakenClient {
                                         ask_array[0].as_str(),
                                         ask_array[1].as_str(),
                                     ) {
+                                        println!("[Kraken] Ask: price_str={}, volume_str={}", price_str, volume_str);
+                                        
                                         // Skip if volume is "0.00000000" (removal)
                                         if volume_str == "0.00000000" || volume_str == "0" {
                                             continue;
                                         }
                                         
-                                        if let (Some(price), Some(quantity)) = (
-                                            parse_price_cents(price_str),
-                                            crate::util::parse_quantity_smallest_unit(volume_str, 8),
-                                        ) {
+                                        let price_opt = parse_price_cents(price_str);
+                                        let quantity_opt = crate::util::parse_quantity_smallest_unit(volume_str, 8);
+                                        
+                                        if let (Some(price), Some(quantity)) = (price_opt, quantity_opt) {
                                             // Parse timestamp if available (3rd element)
                                             let exchange_timestamp = ask_array.get(2)
                                                 .and_then(|t| t.as_str())

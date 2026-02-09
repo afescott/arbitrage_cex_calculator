@@ -83,4 +83,15 @@ mod tests {
         assert_eq!(parse_price_cents("100"), Some(10000)); // No decimal point - assumes .00
         assert_eq!(parse_price_cents("0"), Some(0));
     }
+
+    #[test]
+    fn test_parse_quantity_smallest_unit() {
+        // Test with 8 decimals (BTC)
+        assert_eq!(parse_quantity_smallest_unit("1.5", 8), Some(150000000));
+        assert_eq!(parse_quantity_smallest_unit("0.001", 8), Some(100000));
+        assert_eq!(parse_quantity_smallest_unit("100", 8), Some(10000000000));
+        assert_eq!(parse_quantity_smallest_unit("0.00000001", 8), Some(1));
+        assert_eq!(parse_quantity_smallest_unit("0.12345678", 8), Some(12345678));
+        assert_eq!(parse_quantity_smallest_unit("0.123456789", 8), Some(12345678)); // Truncates
+    }
 }
