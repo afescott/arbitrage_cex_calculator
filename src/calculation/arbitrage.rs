@@ -96,9 +96,8 @@ impl ArbitrageDetector {
     /// # Arguments
     /// * `our_bid_price` - Price we're willing to pay (in cents)
     /// * `our_exchange` - Exchange where we want to buy
-    /// * `best_ask_price` - Best ask price available elsewhere (in cents)
-    /// * `best_ask_exchange` - Exchange with best ask price
-    /// * `quantity` - Quantity we want to trade
+    /// * `best_ask` - Best ask price and quantity available elsewhere (price, quantity, exchange)
+    /// * `desired_quantity` - Quantity we want to trade
     /// 
     /// # Returns
     /// `Some(ArbitrageOpportunity)` if profitable opportunity exists, `None` otherwise
@@ -106,13 +105,18 @@ impl ArbitrageDetector {
         &self,
         our_bid_price: u64,
         our_exchange: Exchange,
-        best_ask_price: Option<(u64, Exchange)>,
-        quantity: u64,
+        best_ask: Option<(u64, u64, Exchange)>,
+        desired_quantity: u64,
     ) -> Option<ArbitrageOpportunity> {
-        let (best_ask_price, best_ask_exchange) = best_ask_price?;
+        let (best_ask_price, best_ask_quantity, best_ask_exchange) = best_ask?;
 
         // Can't arbitrage on same exchange
         if best_ask_exchange == our_exchange {
+            return None;
+        }
+
+        // Check liquidity - must have sufficient quantity available
+        if best_ask_quantity < desired_quantity {
             return None;
         }
 
@@ -123,13 +127,13 @@ impl ArbitrageDetector {
 
         // Calculate gross profit
         let gross_profit = our_bid_price.saturating_sub(best_ask_price);
-        let gross_profit_total = gross_profit.saturating_mul(quantity);
+        let gross_profit_total = gross_profit.saturating_mul(desired_quantity);
 
         // Calculate fees
         let fees = crate::calculation::fees::FeeCalculator::calculate_total_fees(
             best_ask_price,
             our_bid_price,
-            quantity,
+            desired_quantity,
             best_ask_exchange,
             our_exchange,
         );
@@ -147,7 +151,7 @@ impl ArbitrageDetector {
             our_exchange,
             best_ask_price,
             our_bid_price,
-            quantity,
+            desired_quantity,
             gross_profit_total,
             net_profit,
             Instant::now(),
@@ -159,9 +163,8 @@ impl ArbitrageDetector {
     /// # Arguments
     /// * `our_ask_price` - Price we're willing to sell at (in cents)
     /// * `our_exchange` - Exchange where we want to sell
-    /// * `best_bid_price` - Best bid price available elsewhere (in cents)
-    /// * `best_bid_exchange` - Exchange with best bid price
-    /// * `quantity` - Quantity we want to trade
+    /// * `best_bid` - Best bid price and quantity available elsewhere (price, quantity, exchange)
+    /// * `desired_quantity` - Quantity we want to trade
     /// 
     /// # Returns
     /// `Some(ArbitrageOpportunity)` if profitable opportunity exists, `None` otherwise
@@ -169,13 +172,18 @@ impl ArbitrageDetector {
         &self,
         our_ask_price: u64,
         our_exchange: Exchange,
-        best_bid_price: Option<(u64, Exchange)>,
-        quantity: u64,
+        best_bid: Option<(u64, u64, Exchange)>,
+        desired_quantity: u64,
     ) -> Option<ArbitrageOpportunity> {
-        let (best_bid_price, best_bid_exchange) = best_bid_price?;
+        let (best_bid_price, best_bid_quantity, best_bid_exchange) = best_bid?;
 
         // Can't arbitrage on same exchange
         if best_bid_exchange == our_exchange {
+            return None;
+        }
+
+        // Check liquidity - must have sufficient quantity available
+        if best_bid_quantity < desired_quantity {
             return None;
         }
 
@@ -186,13 +194,13 @@ impl ArbitrageDetector {
 
         // Calculate gross profit
         let gross_profit = best_bid_price.saturating_sub(our_ask_price);
-        let gross_profit_total = gross_profit.saturating_mul(quantity);
+        let gross_profit_total = gross_profit.saturating_mul(desired_quantity);
 
         // Calculate fees
         let fees = crate::calculation::fees::FeeCalculator::calculate_total_fees(
             our_ask_price,
             best_bid_price,
-            quantity,
+            desired_quantity,
             our_exchange,
             best_bid_exchange,
         );
@@ -210,7 +218,7 @@ impl ArbitrageDetector {
             best_bid_exchange,
             our_ask_price,
             best_bid_price,
-            quantity,
+            desired_quantity,
             gross_profit_total,
             net_profit,
             Instant::now(),
@@ -254,7 +262,7 @@ mod tests {
         let opportunity = detector.check_buy_opportunity(
             5_000_000,              // $50,000 our bid
             Exchange::Binance,
-            Some((4_990_000, Exchange::Coinbase)), // $49,900 best ask
+            Some((4_990_000, 2_000_000, Exchange::Coinbase)), // $49,900 best ask, 0.02 BTC available
             1_000_000,              // 0.01 BTC (in smallest units)
         );
 
@@ -273,10 +281,26 @@ mod tests {
         let opportunity = detector.check_buy_opportunity(
             5_000_000,              // $50,000 our bid
             Exchange::Binance,
-            Some((5_010_000, Exchange::Coinbase)), // $50,100 best ask (higher!)
+            Some((5_010_000, 2_000_000, Exchange::Coinbase)), // $50,100 best ask (higher!)
             1_000_000,
         );
 
+        assert!(opportunity.is_none());
+    }
+
+    #[test]
+    fn test_buy_opportunity_insufficient_liquidity() {
+        let detector = ArbitrageDetector::default();
+
+        // Good price but insufficient liquidity
+        let opportunity = detector.check_buy_opportunity(
+            5_000_000,              // $50,000 our bid
+            Exchange::Binance,
+            Some((4_990_000, 500_000, Exchange::Coinbase)), // $49,900 best ask, but only 0.005 BTC available
+            1_000_000,              // Need 0.01 BTC
+        );
+
+        // Should be filtered out due to insufficient liquidity
         assert!(opportunity.is_none());
     }
 
@@ -288,7 +312,7 @@ mod tests {
         let opportunity = detector.check_sell_opportunity(
             5_000_000,              // $50,000 our ask
             Exchange::Binance,
-            Some((5_010_000, Exchange::Coinbase)), // $50,100 best bid
+            Some((5_010_000, 2_000_000, Exchange::Coinbase)), // $50,100 best bid, 0.02 BTC available
             1_000_000,
         );
 
@@ -307,7 +331,7 @@ mod tests {
         let opportunity = detector.check_buy_opportunity(
             5_000_000,
             Exchange::Binance,
-            Some((4_990_000, Exchange::Binance)), // Same exchange!
+            Some((4_990_000, 2_000_000, Exchange::Binance)), // Same exchange!
             1_000_000,
         );
 
@@ -323,7 +347,7 @@ mod tests {
         let opportunity = strict_detector.check_buy_opportunity(
             5_000_000,
             Exchange::Binance,
-            Some((4_999_000, Exchange::Coinbase)), // Only $10 difference
+            Some((4_999_000, 2_000_000, Exchange::Coinbase)), // Only $10 difference
             1_000_000,
         );
 

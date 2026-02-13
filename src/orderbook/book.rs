@@ -37,6 +37,14 @@ pub enum Exchange {
     Kraken,
 }
 
+/// Represents the best price level with both price and quantity.
+/// Uses AtomicU64 for lock-free reads in low-latency scenarios.
+#[derive(Default)]
+pub struct BestPriceLevel {
+    pub price: AtomicU64,
+    pub quantity: AtomicU64,
+}
+
 /// The OrderBook manages a collection of price levels for both bid and ask sides.
 /// It supports adding, cancelling, and matching orders with lock-free operations where possible.
 pub struct OrderBook {
@@ -47,17 +55,17 @@ pub struct OrderBook {
     // One BTreeMap per exchange, sorted by price,
     pub exchange_asks_price_level: DashMap<Exchange, Arc<RwLock<BTreeMap<u64, u64>>>>,
 
-    pub cached_best_bid: DashMap<Exchange, AtomicU64>,
+    pub cached_best_bid: DashMap<Exchange, BestPriceLevel>,
 
-    pub cached_best_ask: DashMap<Exchange, AtomicU64>,
+    pub cached_best_ask: DashMap<Exchange, BestPriceLevel>,
 
     /// Best bid across all exchanges. Returns None if no data available.
-    /// The tuple contains (exchange, price), where price of 0 means no data.
-    pub best_bid_all_exchanges: (Exchange, AtomicU64),
+    /// The tuple contains (exchange, price, quantity), where price of 0 means no data.
+    pub best_bid_all_exchanges: Arc<std::sync::Mutex<(Exchange, BestPriceLevel)>>,
 
     /// Best ask across all exchanges. Returns None if no data available.
-    /// The tuple contains (exchange, price), where price of 0 means no data.
-    pub best_ask_all_exchanges: (Exchange, AtomicU64),
+    /// The tuple contains (exchange, price, quantity), where price of 0 means no data.
+    pub best_ask_all_exchanges: Arc<std::sync::Mutex<(Exchange, BestPriceLevel)>>,
 }
 
 impl OrderBook {
@@ -68,48 +76,62 @@ impl OrderBook {
             exchange_asks_price_level: DashMap::new(),
             cached_best_bid: DashMap::new(),
             cached_best_ask: DashMap::new(),
-            best_bid_all_exchanges: (Exchange::Binance, AtomicU64::new(0)),
-            best_ask_all_exchanges: (Exchange::Binance, AtomicU64::new(0)),
+            best_bid_all_exchanges: Arc::new(std::sync::Mutex::new((Exchange::Binance, BestPriceLevel::default()))),
+            best_ask_all_exchanges: Arc::new(std::sync::Mutex::new((Exchange::Binance, BestPriceLevel::default()))),
         }
     }
 
-    pub fn best_bid(&self, exchange: Exchange) -> Option<u64> {
+    pub fn best_bid(&self, exchange: Exchange) -> Option<(u64, u64)> {
         let best_bid = self.cached_best_bid.get(&exchange)?;
 
-        Some(best_bid.load(std::sync::atomic::Ordering::Relaxed))
-    }
-
-    pub fn best_ask(&self, exchange: Exchange) -> Option<u64> {
-        let best_ask = self.cached_best_ask.get(&exchange)?;
-
-        Some(best_ask.load(std::sync::atomic::Ordering::Relaxed))
-    }
-
-    /// Returns the best bid price across all exchanges, or None if no data is available.
-    /// A price of 0 is treated as "no data" since it's invalid for trading.
-    pub fn best_bid_all_exchanges(&self) -> Option<(u64, Exchange)> {
-        let price = self
-            .best_bid_all_exchanges
-            .1
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let price = best_bid.price.load(std::sync::atomic::Ordering::Relaxed);
+        let quantity = best_bid.quantity.load(std::sync::atomic::Ordering::Relaxed);
+        
         if price == 0 {
             None
         } else {
-            Some((price, self.best_bid_all_exchanges.0))
+            Some((price, quantity))
         }
     }
 
-    /// Returns the best ask price across all exchanges, or None if no data is available.
-    /// A price of 0 is treated as "no data" since it's invalid for trading.
-    pub fn best_ask_all_exchanges(&self) -> Option<(u64, Exchange)> {
-        let price = self
-            .best_ask_all_exchanges
-            .1
-            .load(std::sync::atomic::Ordering::Relaxed);
+    pub fn best_ask(&self, exchange: Exchange) -> Option<(u64, u64)> {
+        let best_ask = self.cached_best_ask.get(&exchange)?;
+
+        let price = best_ask.price.load(std::sync::atomic::Ordering::Relaxed);
+        let quantity = best_ask.quantity.load(std::sync::atomic::Ordering::Relaxed);
+        
         if price == 0 {
             None
         } else {
-            Some((price, self.best_ask_all_exchanges.0))
+            Some((price, quantity))
+        }
+    }
+
+    /// Returns the best bid price and quantity across all exchanges, or None if no data is available.
+    /// A price of 0 is treated as "no data" since it's invalid for trading.
+    /// Returns (price, quantity, exchange).
+    pub fn best_bid_all_exchanges(&self) -> Option<(u64, u64, Exchange)> {
+        let guard = self.best_bid_all_exchanges.lock().unwrap();
+        let price = guard.1.price.load(std::sync::atomic::Ordering::Relaxed);
+        if price == 0 {
+            None
+        } else {
+            let quantity = guard.1.quantity.load(std::sync::atomic::Ordering::Relaxed);
+            Some((price, quantity, guard.0))
+        }
+    }
+
+    /// Returns the best ask price and quantity across all exchanges, or None if no data is available.
+    /// A price of 0 is treated as "no data" since it's invalid for trading.
+    /// Returns (price, quantity, exchange).
+    pub fn best_ask_all_exchanges(&self) -> Option<(u64, u64, Exchange)> {
+        let guard = self.best_ask_all_exchanges.lock().unwrap();
+        let price = guard.1.price.load(std::sync::atomic::Ordering::Relaxed);
+        if price == 0 {
+            None
+        } else {
+            let quantity = guard.1.quantity.load(std::sync::atomic::Ordering::Relaxed);
+            Some((price, quantity, guard.0))
         }
     }
 
@@ -147,19 +169,32 @@ impl OrderBook {
         match side {
             Side::Buy => {
                 let val = self.best_ask_all_exchanges();
-                if let Some(best_ask_exchange) = val {
-                    if best_ask_exchange.1 != exchange && best_ask_exchange.0 < price {
-                        println!("Best ask: {:?} from exchange: {:?}, is better higher than our bid: {:?}, from exchange: {:?}",
-                            best_ask_exchange.0, best_ask_exchange.1, exchange, price);
+                if let Some((best_ask_price, best_ask_quantity, best_ask_exchange)) = val {
+                    if best_ask_exchange != exchange && best_ask_price < price {
+                        // Check if there's sufficient liquidity
+                        if best_ask_quantity >= quantity {
+                            println!("Best ask: {:?} (qty: {:?}) from exchange: {:?}, is better than our bid: {:?}, from exchange: {:?}",
+                                best_ask_price, best_ask_quantity, best_ask_exchange, price, exchange);
+                        } else {
+                            println!("Best ask: {:?} (qty: {:?}) from exchange: {:?}, insufficient liquidity for {:?}, from exchange: {:?}",
+                                best_ask_price, best_ask_quantity, best_ask_exchange, quantity, exchange);
+                        }
                     }
                 }
             }
             Side::Sell => {
                 let val = self.best_bid_all_exchanges();
-                if let Some(best_bid_exchange) = val {
-                    if best_bid_exchange.1 != exchange && best_bid_exchange.0 > price {}
-                    println!("Best bid: {:?} from exchange: {:?}, is better lower than our ask: {:?}, from exchange: {:?}",
-                            best_bid_exchange.0, best_bid_exchange.1, exchange, price);
+                if let Some((best_bid_price, best_bid_quantity, best_bid_exchange)) = val {
+                    if best_bid_exchange != exchange && best_bid_price > price {
+                        // Check if there's sufficient liquidity
+                        if best_bid_quantity >= quantity {
+                            println!("Best bid: {:?} (qty: {:?}) from exchange: {:?}, is better than our ask: {:?}, from exchange: {:?}",
+                                best_bid_price, best_bid_quantity, best_bid_exchange, price, exchange);
+                        } else {
+                            println!("Best bid: {:?} (qty: {:?}) from exchange: {:?}, insufficient liquidity for {:?}, from exchange: {:?}",
+                                best_bid_price, best_bid_quantity, best_bid_exchange, quantity, exchange);
+                        }
+                    }
                 }
             }
         }
@@ -174,31 +209,81 @@ impl OrderBook {
     ) {
         match side {
             Side::Buy => {
-                let key = (price, exchange);
                 let price_level = self
                     .exchange_bids_price_level
-                    .entry(key.1)
+                    .entry(exchange)
                     .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())));
-                let mut guard = match price_level.value().write() {
+                let mut guard = match (*price_level.value()).write() {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 let entry = guard.entry(price).or_insert(0);
                 *entry += quantity;
+                
+                // Update cached best bid if this is the new best (highest price for bids)
+                let best_bid = guard.keys().next_back().copied(); // BTreeMap is sorted, last is highest
+                if let Some(best_price) = best_bid {
+                    let best_quantity = guard.get(&best_price).copied().unwrap_or(0);
+                    self.update_cached_best_bid(exchange, best_price, best_quantity);
+                }
             }
             Side::Sell => {
-                let key = (price, exchange);
                 let price_level = self
                     .exchange_asks_price_level
-                    .entry(key.1)
+                    .entry(exchange)
                     .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())));
-                let mut guard = match price_level.value().write() {
+                let mut guard = match (*price_level.value()).write() {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
                 };
                 let entry = guard.entry(price).or_insert(0);
                 *entry += quantity;
+                
+                // Update cached best ask if this is the new best (lowest price for asks)
+                let best_ask = guard.keys().next().copied(); // BTreeMap is sorted, first is lowest
+                if let Some(best_price) = best_ask {
+                    let best_quantity = guard.get(&best_price).copied().unwrap_or(0);
+                    self.update_cached_best_ask(exchange, best_price, best_quantity);
+                }
             }
+        }
+    }
+
+    /// Update cached best bid for an exchange and check if it's the global best
+    fn update_cached_best_bid(&self, exchange: Exchange, price: u64, quantity: u64) {
+        let level = self
+            .cached_best_bid
+            .entry(exchange)
+            .or_insert_with(BestPriceLevel::default);
+        level.price.store(price, std::sync::atomic::Ordering::Relaxed);
+        level.quantity.store(quantity, std::sync::atomic::Ordering::Relaxed);
+        
+        // Check if this is the new global best bid (highest price across all exchanges)
+        let mut global = self.best_bid_all_exchanges.lock().unwrap();
+        let current_global_price = global.1.price.load(std::sync::atomic::Ordering::Relaxed);
+        if price > current_global_price || current_global_price == 0 {
+            global.0 = exchange;
+            global.1.price.store(price, std::sync::atomic::Ordering::Relaxed);
+            global.1.quantity.store(quantity, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Update cached best ask for an exchange and check if it's the global best
+    fn update_cached_best_ask(&self, exchange: Exchange, price: u64, quantity: u64) {
+        let level = self
+            .cached_best_ask
+            .entry(exchange)
+            .or_insert_with(BestPriceLevel::default);
+        level.price.store(price, std::sync::atomic::Ordering::Relaxed);
+        level.quantity.store(quantity, std::sync::atomic::Ordering::Relaxed);
+        
+        // Check if this is the new global best ask (lowest price across all exchanges)
+        let mut global = self.best_ask_all_exchanges.lock().unwrap();
+        let current_global_price = global.1.price.load(std::sync::atomic::Ordering::Relaxed);
+        if price < current_global_price || current_global_price == 0 {
+            global.0 = exchange;
+            global.1.price.store(price, std::sync::atomic::Ordering::Relaxed);
+            global.1.quantity.store(quantity, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -220,27 +305,26 @@ mod test {
         order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 10);
         order_book.add_exchange_price_level(50000, Exchange::Coinbase, Side::Buy, 20);
 
-        let binance_key = (50000, Exchange::Binance);
-        let coinbase_key = (50000, Exchange::Coinbase);
-
         assert!(order_book
             .exchange_bids_price_level
-            .contains_key(&binance_key));
+            .contains_key(&Exchange::Binance));
         assert!(order_book
             .exchange_bids_price_level
-            .contains_key(&coinbase_key));
+            .contains_key(&Exchange::Coinbase));
 
         let binance_level = order_book
             .exchange_bids_price_level
-            .get(&binance_key)
+            .get(&Exchange::Binance)
             .unwrap();
         let coinbase_level = order_book
             .exchange_bids_price_level
-            .get(&coinbase_key)
+            .get(&Exchange::Coinbase)
             .unwrap();
 
-        assert_eq!(binance_level.get(&50000), Some(&10));
-        assert_eq!(coinbase_level.get(&50000), Some(&20));
+        let binance_map = binance_level.value().read().unwrap();
+        let coinbase_map = coinbase_level.value().read().unwrap();
+        assert_eq!(binance_map.get(&50000), Some(&10));
+        assert_eq!(coinbase_map.get(&50000), Some(&20));
     }
 
     #[test]
@@ -250,11 +334,11 @@ mod test {
         // Add bid for Binance
         order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 10);
 
-        let key = (50000, Exchange::Binance);
-        assert!(order_book.exchange_bids_price_level.contains_key(&key));
+        assert!(order_book.exchange_bids_price_level.contains_key(&Exchange::Binance));
 
-        let price_level = order_book.exchange_bids_price_level.get(&key).unwrap();
-        assert_eq!(price_level.get(&50000), Some(&10));
+        let price_level = order_book.exchange_bids_price_level.get(&Exchange::Binance).unwrap();
+        let map = price_level.value().read().unwrap();
+        assert_eq!(map.get(&50000), Some(&10));
     }
 
     #[test]
@@ -264,11 +348,11 @@ mod test {
         // Add ask for Coinbase
         order_book.add_exchange_price_level(50100, Exchange::Coinbase, Side::Sell, 5);
 
-        let key = (50100, Exchange::Coinbase);
-        assert!(order_book.exchange_asks_price_level.contains_key(&key));
+        assert!(order_book.exchange_asks_price_level.contains_key(&Exchange::Coinbase));
 
-        let price_level = order_book.exchange_asks_price_level.get(&key).unwrap();
-        assert_eq!(price_level.get(&50100), Some(&5));
+        let price_level = order_book.exchange_asks_price_level.get(&Exchange::Coinbase).unwrap();
+        let map = price_level.value().read().unwrap();
+        assert_eq!(map.get(&50100), Some(&5));
     }
 
     #[test]
@@ -280,9 +364,9 @@ mod test {
         order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 5);
         order_book.add_exchange_price_level(50000, Exchange::Binance, Side::Buy, 3);
 
-        let key = (50000, Exchange::Binance);
-        let price_level = order_book.exchange_bids_price_level.get(&key).unwrap();
-        assert_eq!(price_level.get(&50000), Some(&18)); // 10 + 5 + 3
+        let price_level = order_book.exchange_bids_price_level.get(&Exchange::Binance).unwrap();
+        let map = price_level.value().read().unwrap();
+        assert_eq!(map.get(&50000), Some(&18)); // 10 + 5 + 3
     }
 
     #[tokio::test]
@@ -290,29 +374,22 @@ mod test {
         let order_book = Arc::new(OrderBook::new("ETH/USD".to_string()));
         let book_1 = Arc::clone(&order_book);
         let book_2 = Arc::clone(&order_book);
-        let (tx, mut rx) = channel::<u64>(1);
 
-        let task = tokio::spawn(async move {
+        let task_1 = tokio::spawn(async move {
             book_1.add_exchange_price_level(2000, Exchange::Binance, Side::Sell, 13);
-
-            let key = (2000, Exchange::Binance);
-            let price_level = book_1.exchange_asks_price_level.get(&key).unwrap();
-            let quantity = price_level.get(&2000).unwrap();
-
-            tokio::time::sleep(Duration::from_secs(1)).await;
-
-            tx.send(*quantity).await.unwrap();
         });
 
         let task_2 = tokio::spawn(async move {
             book_2.add_exchange_price_level(2000, Exchange::Binance, Side::Sell, 13);
         });
 
-        tokio::join!(task, task_2);
+        tokio::join!(task_1, task_2);
 
-        while let Some(val) = rx.recv().await {
-            // Quantities should accumulate: 13 + 13 = 26
-            assert_eq!(val, 26);
-        }
+        // After both tasks complete, check that quantities accumulated
+        let price_level = order_book.exchange_asks_price_level.get(&Exchange::Binance).unwrap();
+        let map = price_level.value().read().unwrap();
+        let quantity = map.get(&2000).unwrap();
+        // Quantities should accumulate: 13 + 13 = 26
+        assert_eq!(*quantity, 26);
     }
 }
