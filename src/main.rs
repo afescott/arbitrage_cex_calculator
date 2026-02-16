@@ -23,7 +23,6 @@ async fn run(order_book_name: String) {
     info!("Starting low-latency order book aggregator...");
     info!("Monitoring BTC/USDT pair across multiple exchanges");
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangePrice>(1000);
-    let (tx_exchange, rx_exchange) = tokio::sync::mpsc::channel::<ExchangePrice>(1000);
 
     // Spawn tasks for each exchange
     let binance_tx = tx.clone();
@@ -117,7 +116,6 @@ async fn run(order_book_name: String) {
                 price,
                 price.exchange_timestamp()
             );
-            tx_exchange.send(price).await.unwrap();
             // Here you could implement more complex aggregation logic
         }
     });

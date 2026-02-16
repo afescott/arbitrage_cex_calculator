@@ -224,6 +224,7 @@ impl OrderBook {
                 let best_bid = guard.keys().next_back().copied(); // BTreeMap is sorted, last is highest
                 if let Some(best_price) = best_bid {
                     let best_quantity = guard.get(&best_price).copied().unwrap_or(0);
+                    drop(guard); // Explicitly drop guard before calling update
                     self.update_cached_best_bid(exchange, best_price, best_quantity);
                 }
             }
@@ -243,6 +244,7 @@ impl OrderBook {
                 let best_ask = guard.keys().next().copied(); // BTreeMap is sorted, first is lowest
                 if let Some(best_price) = best_ask {
                     let best_quantity = guard.get(&best_price).copied().unwrap_or(0);
+                    drop(guard); // Explicitly drop guard before calling update
                     self.update_cached_best_ask(exchange, best_price, best_quantity);
                 }
             }
