@@ -20,25 +20,36 @@ pub enum Exchange {
     Coinbase,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum Side {
+    /// Buy side (bids)
+    Buy,
+    /// Sell side (asks)
+    Sell,
+}
+
 // ExchangePrice includes price, quantity, exchange timestamp, and receive timestamp
 pub enum ExchangePrice {
     Binance {
         price: u64,
         quantity: u64,
         exchange_timestamp: Option<u64>, // From exchange (E field, milliseconds)
-        received_at: Instant,           // When we received it
+        received_at: Instant,            // When we received it
+        side: Side,                      // Buy or Sell side
     },
     Kraken {
         price: u64,
         quantity: u64,
         exchange_timestamp: Option<u64>, // From exchange (timestamp field)
         received_at: Instant,
+        side: Side, // Buy or Sell side
     },
     Coinbase {
         price: u64,
         quantity: u64,
         exchange_timestamp: Option<u64>, // From exchange (time field)
         received_at: Instant,
+        side: Side, // Buy or Sell side
     },
 }
 
@@ -69,9 +80,15 @@ impl ExchangePrice {
 
     pub fn exchange_timestamp(&self) -> Option<u64> {
         match self {
-            ExchangePrice::Binance { exchange_timestamp, .. } => *exchange_timestamp,
-            ExchangePrice::Kraken { exchange_timestamp, .. } => *exchange_timestamp,
-            ExchangePrice::Coinbase { exchange_timestamp, .. } => *exchange_timestamp,
+            ExchangePrice::Binance {
+                exchange_timestamp, ..
+            } => *exchange_timestamp,
+            ExchangePrice::Kraken {
+                exchange_timestamp, ..
+            } => *exchange_timestamp,
+            ExchangePrice::Coinbase {
+                exchange_timestamp, ..
+            } => *exchange_timestamp,
         }
     }
 
@@ -80,6 +97,14 @@ impl ExchangePrice {
             ExchangePrice::Binance { .. } => Exchange::Binance,
             ExchangePrice::Kraken { .. } => Exchange::Kraken,
             ExchangePrice::Coinbase { .. } => Exchange::Coinbase,
+        }
+    }
+
+    pub fn side(&self) -> Side {
+        match self {
+            ExchangePrice::Binance { side, .. } => *side,
+            ExchangePrice::Kraken { side, .. } => *side,
+            ExchangePrice::Coinbase { side, .. } => *side,
         }
     }
 
@@ -101,21 +126,33 @@ impl std::fmt::Display for ExchangePrice {
         match self {
             ExchangePrice::Binance { price, .. } => {
                 if let Some(ts) = exchange_ts {
-                    write!(f, "Binance: {} cents (exchange_ts: {}ms, latency: {}μs)", price, ts, latency_us)
+                    write!(
+                        f,
+                        "Binance: {} cents (exchange_ts: {}ms, latency: {}μs)",
+                        price, ts, latency_us
+                    )
                 } else {
                     write!(f, "Binance: {} cents (latency: {}μs)", price, latency_us)
                 }
             }
             ExchangePrice::Kraken { price, .. } => {
                 if let Some(ts) = exchange_ts {
-                    write!(f, "Kraken: {} cents (exchange_ts: {}ms, latency: {}μs)", price, ts, latency_us)
+                    write!(
+                        f,
+                        "Kraken: {} cents (exchange_ts: {}ms, latency: {}μs)",
+                        price, ts, latency_us
+                    )
                 } else {
                     write!(f, "Kraken: {} cents (latency: {}μs)", price, latency_us)
                 }
             }
             ExchangePrice::Coinbase { price, .. } => {
                 if let Some(ts) = exchange_ts {
-                    write!(f, "Coinbase: {} cents (exchange_ts: {}ms, latency: {}μs)", price, ts, latency_us)
+                    write!(
+                        f,
+                        "Coinbase: {} cents (exchange_ts: {}ms, latency: {}μs)",
+                        price, ts, latency_us
+                    )
                 } else {
                     write!(f, "Coinbase: {} cents (latency: {}μs)", price, latency_us)
                 }

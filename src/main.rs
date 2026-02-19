@@ -20,8 +20,8 @@ async fn run(order_book_name: String) {
         .with_target(false)
         .init();
 
-    info!("Starting low-latency order book aggregator...");
-    info!("Monitoring BTC/USDT pair across multiple exchanges");
+    // info!("Starting low-latency order book aggregator...");
+    // info!("Monitoring BTC/USDT pair across multiple exchanges");
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangePrice>(1000);
 
     // Spawn tasks for each exchange
@@ -39,16 +39,6 @@ async fn run(order_book_name: String) {
         CoinbaseClient::new(tx).listen_btc_usdt().await;
     });
 
-    /* let compare_price_handle = tokio::spawn(async move {
-    });
-        while let Some(price) = rx.recv().await {
-            info!(
-                "Received BTC/USDT price: {}, exchange timestamp: {:?}",
-                price.price(),
-                price.exchange_timestamp()
-            );
-        }
-    }); */
     let orderbook = OrderBook::new(order_book_name.to_string());
     let aggregator_handle = tokio::spawn(async move {
         while let Some(price) = rx.recv().await {
@@ -58,17 +48,24 @@ async fn run(order_book_name: String) {
                     quantity,
                     exchange_timestamp: _,
                     received_at: _,
+                    side,
                 } => {
-                    orderbook.check_for_immediate_purchase(
+                    // Convert api::Side to pricelevel::Side
+                    let orderbook_side = match side {
+                        api::Side::Buy => pricelevel::Side::Buy,
+                        api::Side::Sell => pricelevel::Side::Sell,
+                    };
+                    let res = orderbook.check_for_immediate_purchase(
                         price,
                         orderbook::book::Exchange::Binance,
-                        pricelevel::Side::Buy,
+                        orderbook_side,
                         quantity,
                     );
+
                     orderbook.add_exchange_price_level(
                         price,
                         orderbook::book::Exchange::Binance,
-                        pricelevel::Side::Buy,
+                        orderbook_side,
                         quantity,
                     );
                 }
@@ -77,17 +74,23 @@ async fn run(order_book_name: String) {
                     quantity,
                     exchange_timestamp: _,
                     received_at: _,
+                    side,
                 } => {
+                    // Convert api::Side to pricelevel::Side
+                    let orderbook_side = match side {
+                        api::Side::Buy => pricelevel::Side::Buy,
+                        api::Side::Sell => pricelevel::Side::Sell,
+                    };
                     orderbook.check_for_immediate_purchase(
                         price,
                         orderbook::book::Exchange::Kraken,
-                        pricelevel::Side::Buy,
+                        orderbook_side,
                         quantity,
                     );
                     orderbook.add_exchange_price_level(
                         price,
                         orderbook::book::Exchange::Kraken,
-                        pricelevel::Side::Buy,
+                        orderbook_side,
                         quantity,
                     );
                 }
@@ -96,26 +99,27 @@ async fn run(order_book_name: String) {
                     quantity,
                     exchange_timestamp: _,
                     received_at: _,
+                    side,
                 } => {
+                    // Convert api::Side to pricelevel::Side
+                    let orderbook_side = match side {
+                        api::Side::Buy => pricelevel::Side::Buy,
+                        api::Side::Sell => pricelevel::Side::Sell,
+                    };
                     orderbook.check_for_immediate_purchase(
                         price,
                         orderbook::book::Exchange::Coinbase,
-                        pricelevel::Side::Buy,
+                        orderbook_side,
                         quantity,
                     );
                     orderbook.add_exchange_price_level(
                         price,
                         orderbook::book::Exchange::Coinbase,
-                        pricelevel::Side::Buy,
+                        orderbook_side,
                         quantity,
                     );
                 }
             }
-            info!(
-                "Aggregated BTC/USDT price: {}, exchange timestamp: {:?}",
-                price,
-                price.exchange_timestamp()
-            );
             // Here you could implement more complex aggregation logic
         }
     });
@@ -123,16 +127,16 @@ async fn run(order_book_name: String) {
     // Wait for all tasks (they run indefinitely)
     tokio::select! {
         _ = binance_handle => {
-            info!("Binance task ended");
+            // info!("Binance task ended");
         }
         _ = kraken_handle => {
-            info!("Kraken task ended");
+            // info!("Kraken task ended");
         }
         _ = coinbase_handle => {
-            info!("Coinbase task ended");
+            // info!("Coinbase task ended");
         }
         _ = aggregator_handle => {
-            info!("Aggregator task ended");
+            // info!("Aggregator task ended");
         }
     }
 }

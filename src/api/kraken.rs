@@ -1,4 +1,4 @@
-use crate::{api::ExchangePrice, util::parse_price_cents};
+use crate::{api::{ExchangePrice, Side}, util::parse_price_cents};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -16,11 +16,11 @@ impl KrakenClient {
     }
 
     pub async fn listen_btc_usdt(&self) {
-        info!("[Kraken] Connecting to BTC/USDT orderbook depth stream...");
+        // info!("[Kraken] Connecting to BTC/USDT orderbook depth stream...");
 
         match connect_async(KRAKEN_WS_URL).await {
             Ok((mut ws_stream, _)) => {
-                info!("[Kraken] Connected successfully");
+                // info!("[Kraken] Connected successfully");
 
                 // Subscribe to XBT/USD orderbook (Kraken uses XBT for Bitcoin)
                 let subscribe_msg = serde_json::json!({
@@ -36,7 +36,7 @@ impl KrakenClient {
                     .send(Message::Text(subscribe_msg.to_string()))
                     .await
                 {
-                    error!("[Kraken] Failed to send subscription: {}", e);
+                    // error!("[Kraken] Failed to send subscription: {}", e);
                     return;
                 }
 
@@ -48,18 +48,18 @@ impl KrakenClient {
                             // Capture timestamp immediately when message received
                             let received_at = Instant::now();
                             if let Err(e) = self.handle_message(&text, received_at).await {
-                                warn!("[Kraken] Error handling message: {}", e);
+                                // warn!("[Kraken] Error handling message: {}", e);
                             }
                         }
                         Ok(Message::Ping(data)) => {
-                            info!("[Kraken] Received ping");
+                            // info!("[Kraken] Received ping");
                         }
                         Ok(Message::Close(_)) => {
-                            warn!("[Kraken] Connection closed");
+                            // warn!("[Kraken] Connection closed");
                             break;
                         }
                         Err(e) => {
-                            error!("[Kraken] WebSocket error: {}", e);
+                            // error!("[Kraken] WebSocket error: {}", e);
                             break;
                         }
                         _ => {}
@@ -67,7 +67,7 @@ impl KrakenClient {
                 }
             }
             Err(e) => {
-                error!("[Kraken] Failed to connect: {}", e);
+                // error!("[Kraken] Failed to connect: {}", e);
             }
         }
     }
@@ -87,7 +87,7 @@ impl KrakenClient {
 
         // Handle subscription confirmation
         if let Some(event) = value.get("event").and_then(|e| e.as_str()) {
-            info!("[Kraken] Event: {}", event);
+            // info!("[Kraken] Event: {}", event);
             return Ok(());
         }
 
@@ -99,14 +99,14 @@ impl KrakenClient {
         static FIRST_BOOK_MSG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
         if FIRST_BOOK_MSG.swap(false, std::sync::atomic::Ordering::Relaxed) {
             if let Some(array) = value.as_array() {
-                info!("[Kraken] First book message array length: {}", array.len());
+                // info!("[Kraken] First book message array length: {}", array.len());
                 if array.len() >= 2 {
                     if let Some(book_data) = array[1].as_object() {
-                        info!("[Kraken] Book data keys: {:?}", book_data.keys().collect::<Vec<_>>());
-                        info!("[Kraken] Has 'bs' (bids snapshot): {}", book_data.get("bs").is_some());
-                        info!("[Kraken] Has 'b' (bids update): {}", book_data.get("b").is_some());
-                        info!("[Kraken] Has 'as' (asks snapshot): {}", book_data.get("as").is_some());
-                        info!("[Kraken] Has 'a' (asks update): {}", book_data.get("a").is_some());
+                        // info!("[Kraken] Book data keys: {:?}", book_data.keys().collect::<Vec<_>>());
+                        // info!("[Kraken] Has 'bs' (bids snapshot): {}", book_data.get("bs").is_some());
+                        // info!("[Kraken] Has 'b' (bids update): {}", book_data.get("b").is_some());
+                        // info!("[Kraken] Has 'as' (asks snapshot): {}", book_data.get("as").is_some());
+                        // info!("[Kraken] Has 'a' (asks update): {}", book_data.get("a").is_some());
                     }
                 }
             }
@@ -121,7 +121,7 @@ impl KrakenClient {
                         .and_then(|b| b.as_array());
                     
                     if let Some(bids) = bids_opt {
-                        info!("[Kraken] Processing {} bids", bids.len());
+                        // info!("[Kraken] Processing {} bids", bids.len());
                         for bid in bids {
                             if let Some(bid_array) = bid.as_array() {
                                 if bid_array.len() >= 2 {
@@ -129,7 +129,7 @@ impl KrakenClient {
                                         bid_array[0].as_str(),
                                         bid_array[1].as_str(),
                                     ) {
-                                        println!("[Kraken] Bid: price_str={}, volume_str={}", price_str, volume_str);
+                                        // println!("[Kraken] Bid: price_str={}, volume_str={}", price_str, volume_str);
                                         
                                         // Skip if volume is "0.00000000" (removal)
                                         if volume_str == "0.00000000" || volume_str == "0" {
@@ -150,6 +150,7 @@ impl KrakenClient {
                                                 quantity,
                                                 exchange_timestamp,
                                                 received_at,
+                                                side: Side::Buy, // Bids are Buy side
                                             }).await.ok();
                                         }
                                     }
@@ -164,7 +165,7 @@ impl KrakenClient {
                         .and_then(|a| a.as_array());
                     
                     if let Some(asks) = asks_opt {
-                        info!("[Kraken] Processing {} asks", asks.len());
+                        // info!("[Kraken] Processing {} asks", asks.len());
                         for ask in asks {
                             if let Some(ask_array) = ask.as_array() {
                                 if ask_array.len() >= 2 {
@@ -172,7 +173,7 @@ impl KrakenClient {
                                         ask_array[0].as_str(),
                                         ask_array[1].as_str(),
                                     ) {
-                                        println!("[Kraken] Ask: price_str={}, volume_str={}", price_str, volume_str);
+                                        // println!("[Kraken] Ask: price_str={}, volume_str={}", price_str, volume_str);
                                         
                                         // Skip if volume is "0.00000000" (removal)
                                         if volume_str == "0.00000000" || volume_str == "0" {
@@ -193,6 +194,7 @@ impl KrakenClient {
                                                 quantity,
                                                 exchange_timestamp,
                                                 received_at,
+                                                side: Side::Sell, // Asks are Sell side
                                             }).await.ok();
                                         }
                                     }
