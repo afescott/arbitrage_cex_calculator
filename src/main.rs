@@ -3,7 +3,7 @@ mod api;
 mod orderbook;
 mod util;
 
-use api::{BinanceClient, CoinbaseClient, ExchangePrice, KrakenClient};
+use api::{BinanceClient, CoinbaseClient, ExchangePrice, HyperliquidClient, KrakenClient};
 use tracing::{info, Level};
 use tracing_subscriber;
 
@@ -35,8 +35,14 @@ async fn run(order_book_name: String) {
         KrakenClient::new(kraken_tx).listen_btc_usdt().await;
     });
 
+    let coinbase_tx = tx.clone();
     let coinbase_handle = tokio::spawn(async move {
-        CoinbaseClient::new(tx).listen_btc_usdt().await;
+        CoinbaseClient::new(coinbase_tx).listen_btc_usdt().await;
+    });
+
+    let hyperliquid_tx = tx.clone();
+    let hyperliquid_handle = tokio::spawn(async move {
+        HyperliquidClient::new(hyperliquid_tx).listen_btc_usdt().await;
     });
 
     let orderbook = OrderBook::new(order_book_name.to_string());
@@ -119,6 +125,31 @@ async fn run(order_book_name: String) {
                         quantity,
                     );
                 }
+                ExchangePrice::Hyperliquid {
+                    price,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
+                    side,
+                } => {
+                    // Convert api::Side to pricelevel::Side
+                    let orderbook_side = match side {
+                        api::Side::Buy => pricelevel::Side::Buy,
+                        api::Side::Sell => pricelevel::Side::Sell,
+                    };
+                    orderbook.check_for_immediate_purchase(
+                        price,
+                        orderbook::book::Exchange::Hyperliquid,
+                        orderbook_side,
+                        quantity,
+                    );
+                    orderbook.add_exchange_price_level(
+                        price,
+                        orderbook::book::Exchange::Hyperliquid,
+                        orderbook_side,
+                        quantity,
+                    );
+                }
             }
             // Here you could implement more complex aggregation logic
         }
@@ -134,6 +165,9 @@ async fn run(order_book_name: String) {
         }
         _ = coinbase_handle => {
             // info!("Coinbase task ended");
+        }
+        _ = hyperliquid_handle => {
+            // info!("Hyperliquid task ended");
         }
         _ = aggregator_handle => {
             // info!("Aggregator task ended");

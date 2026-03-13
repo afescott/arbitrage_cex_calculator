@@ -35,6 +35,7 @@ pub enum Exchange {
     Binance,
     Coinbase,
     Kraken,
+    Hyperliquid,
 }
 
 /// Represents the best price level with both price and quantity.
@@ -147,12 +148,7 @@ impl OrderBook {
         let bids_depth = self
             .exchange_bids_price_level
             .get(&exchange)
-            .and_then(|map| {
-                map.value().read().ok().map(|guard| {
-/*                     println!("Bids depth for {:?}: {}", exchange, guard.len()); */
-                    guard.len()
-                })
-            })
+            .and_then(|map| map.value().read().ok().map(|guard| guard.len()))
             .unwrap_or(0);
 
         let asks_depth = self

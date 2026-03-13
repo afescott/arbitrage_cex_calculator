@@ -1,9 +1,11 @@
 pub mod binance;
 pub mod coinbase;
+pub mod hyperliquid;
 pub mod kraken;
 
 pub use binance::BinanceClient;
 pub use coinbase::CoinbaseClient;
+pub use hyperliquid::HyperliquidClient;
 pub use kraken::KrakenClient;
 
 use std::time::Instant;
@@ -18,6 +20,7 @@ pub enum Exchange {
     Binance,
     Kraken,
     Coinbase,
+    Hyperliquid,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +54,13 @@ pub enum ExchangePrice {
         received_at: Instant,
         side: Side, // Buy or Sell side
     },
+    Hyperliquid {
+        price: u64,
+        quantity: u64,
+        exchange_timestamp: Option<u64>, // From exchange (timestamp field)
+        received_at: Instant,
+        side: Side, // Buy or Sell side (perpetual futures)
+    },
 }
 
 impl ExchangePrice {
@@ -59,6 +69,7 @@ impl ExchangePrice {
             ExchangePrice::Binance { price, .. } => *price,
             ExchangePrice::Kraken { price, .. } => *price,
             ExchangePrice::Coinbase { price, .. } => *price,
+            ExchangePrice::Hyperliquid { price, .. } => *price,
         }
     }
 
@@ -67,6 +78,7 @@ impl ExchangePrice {
             ExchangePrice::Binance { quantity, .. } => *quantity,
             ExchangePrice::Kraken { quantity, .. } => *quantity,
             ExchangePrice::Coinbase { quantity, .. } => *quantity,
+            ExchangePrice::Hyperliquid { quantity, .. } => *quantity,
         }
     }
 
@@ -75,6 +87,7 @@ impl ExchangePrice {
             ExchangePrice::Binance { received_at, .. } => *received_at,
             ExchangePrice::Kraken { received_at, .. } => *received_at,
             ExchangePrice::Coinbase { received_at, .. } => *received_at,
+            ExchangePrice::Hyperliquid { received_at, .. } => *received_at,
         }
     }
 
@@ -89,6 +102,9 @@ impl ExchangePrice {
             ExchangePrice::Coinbase {
                 exchange_timestamp, ..
             } => *exchange_timestamp,
+            ExchangePrice::Hyperliquid {
+                exchange_timestamp, ..
+            } => *exchange_timestamp,
         }
     }
 
@@ -97,6 +113,7 @@ impl ExchangePrice {
             ExchangePrice::Binance { .. } => Exchange::Binance,
             ExchangePrice::Kraken { .. } => Exchange::Kraken,
             ExchangePrice::Coinbase { .. } => Exchange::Coinbase,
+            ExchangePrice::Hyperliquid { .. } => Exchange::Hyperliquid,
         }
     }
 
@@ -105,6 +122,7 @@ impl ExchangePrice {
             ExchangePrice::Binance { side, .. } => *side,
             ExchangePrice::Kraken { side, .. } => *side,
             ExchangePrice::Coinbase { side, .. } => *side,
+            ExchangePrice::Hyperliquid { side, .. } => *side,
         }
     }
 
@@ -155,6 +173,17 @@ impl std::fmt::Display for ExchangePrice {
                     )
                 } else {
                     write!(f, "Coinbase: {} cents (latency: {}μs)", price, latency_us)
+                }
+            }
+            ExchangePrice::Hyperliquid { price, .. } => {
+                if let Some(ts) = exchange_ts {
+                    write!(
+                        f,
+                        "Hyperliquid: {} cents (exchange_ts: {}ms, latency: {}μs)",
+                        price, ts, latency_us
+                    )
+                } else {
+                    write!(f, "Hyperliquid: {} cents (latency: {}μs)", price, latency_us)
                 }
             }
         }
