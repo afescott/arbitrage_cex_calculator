@@ -1,5 +1,5 @@
 mod api;
-// mod calculation;  // Hidden for now
+mod calculation;
 mod orderbook;
 mod util;
 
@@ -42,7 +42,9 @@ async fn run(order_book_name: String) {
 
     let hyperliquid_tx = tx.clone();
     let hyperliquid_handle = tokio::spawn(async move {
-        HyperliquidClient::new(hyperliquid_tx).listen_btc_usdt().await;
+        HyperliquidClient::new(hyperliquid_tx)
+            .listen_btc_usdt()
+            .await;
     });
 
     let orderbook = OrderBook::new(order_book_name.to_string());
@@ -61,7 +63,7 @@ async fn run(order_book_name: String) {
                         api::Side::Buy => pricelevel::Side::Buy,
                         api::Side::Sell => pricelevel::Side::Sell,
                     };
-                    let res = orderbook.check_for_immediate_purchase(
+                    orderbook.check_for_immediate_purchase(
                         price,
                         orderbook::book::Exchange::Binance,
                         orderbook_side,

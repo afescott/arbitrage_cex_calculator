@@ -19,6 +19,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc, RwLock},
 };
 use uuid::Uuid;
+use crate::calculation::ArbitrageDetector;
 
 #[warn(clippy::too_many_lines)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +68,9 @@ pub struct OrderBook {
     /// Best ask across all exchanges. Returns None if no data available.
     /// The tuple contains (exchange, price, quantity), where price of 0 means no data.
     pub best_ask_all_exchanges: Arc<std::sync::Mutex<(Exchange, BestPriceLevel)>>,
+    
+    /// Arbitrage detector for identifying profitable opportunities
+    arbitrage_detector: ArbitrageDetector,
 }
 
 impl OrderBook {
@@ -85,6 +89,7 @@ impl OrderBook {
                 Exchange::Binance,
                 BestPriceLevel::default(),
             ))),
+            arbitrage_detector: ArbitrageDetector::default(),
         }
     }
 
@@ -172,37 +177,42 @@ impl OrderBook {
         if !self.has_sufficient_depth(exchange, MIN_DEPTH_LEVELS) {
             return;
         }
-        match side {
+        
+        let opportunity = match side {
             Side::Buy => {
-                let val = self.best_ask_all_exchanges();
-                if let Some((best_ask_price, best_ask_quantity, best_ask_exchange)) = val {
-                    if best_ask_exchange != exchange && best_ask_price < price {
-                        // Check if there's sufficient liquidity
-                        if best_ask_quantity >= quantity {
-                            println!("Best ask: {:?} (qty: {:?}) from exchange: {:?}, is better than our bid: {:?}, from exchange: {:?}",
-                                best_ask_price, best_ask_quantity, best_ask_exchange, price, exchange);
-                        } else {
-                            println!("Best ask: {:?} (qty: {:?}) from exchange: {:?}, insufficient liquidity for {:?}, from exchange: {:?}",
-                                best_ask_price, best_ask_quantity, best_ask_exchange, quantity, exchange);
-                        }
-                    }
-                }
+                // We want to buy at this exchange, check if we can buy cheaper elsewhere
+                let best_ask = self.best_ask_all_exchanges();
+                self.arbitrage_detector.check_buy_opportunity(
+                    price,
+                    exchange,
+                    best_ask,
+                    quantity,
+                )
             }
             Side::Sell => {
-                let val = self.best_bid_all_exchanges();
-                if let Some((best_bid_price, best_bid_quantity, best_bid_exchange)) = val {
-                    if best_bid_exchange != exchange && best_bid_price > price {
-                        // Check if there's sufficient liquidity
-                        if best_bid_quantity >= quantity {
-                            println!("Best bid: {:?} (qty: {:?}) from exchange: {:?}, is better than our ask: {:?}, from exchange: {:?}",
-                                best_bid_price, best_bid_quantity, best_bid_exchange, price, exchange);
-                        } else {
-                            println!("Best bid: {:?} (qty: {:?}) from exchange: {:?}, insufficient liquidity for {:?}, from exchange: {:?}",
-                                best_bid_price, best_bid_quantity, best_bid_exchange, quantity, exchange);
-                        }
-                    }
-                }
+                // We want to sell at this exchange, check if we can sell higher elsewhere
+                let best_bid = self.best_bid_all_exchanges();
+                self.arbitrage_detector.check_sell_opportunity(
+                    price,
+                    exchange,
+                    best_bid,
+                    quantity,
+                )
             }
+        };
+
+        if let Some(opportunity) = opportunity {
+            // Single println! for all arbitrage opportunities
+            println!(
+                "🚀 ARBITRAGE OPPORTUNITY DETECTED! Buy on {:?} at ${:.2}, Sell on {:?} at ${:.2}, Profit: ${:.2} ({:.2} bps), Qty: {:.8} BTC",
+                opportunity.buy_exchange,
+                opportunity.buy_price as f64 / 100.0,
+                opportunity.sell_exchange,
+                opportunity.sell_price as f64 / 100.0,
+                opportunity.profit_cents as f64 / 100.0,
+                opportunity.profit_bps() as f64 / 100.0,
+                opportunity.quantity as f64 / 100_000_000.0
+            );
         }
     }
 
@@ -240,10 +250,6 @@ impl OrderBook {
                     .entry(exchange)
                     .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())));
 
-                println!(
-                    "Adding ask price level: exchange={:?}, price={}, quantity={}",
-                    exchange, price, quantity
-                );
 
                 let mut guard = match (*price_level.value()).write() {
                     Ok(guard) => guard,

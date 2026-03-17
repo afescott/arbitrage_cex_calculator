@@ -24,6 +24,7 @@ impl FeeCalculator {
             Exchange::Binance => ExchangeFee::new(10, 20),  // 0.1% maker, 0.2% taker
             Exchange::Coinbase => ExchangeFee::new(10, 20), // 0.1% maker, 0.2% taker
             Exchange::Kraken => ExchangeFee::new(16, 26),   // 0.16% maker, 0.26% taker
+            Exchange::Hyperliquid => ExchangeFee::new(2, 2), // 0.02% maker/taker (very low fees!)
         }
     }
 

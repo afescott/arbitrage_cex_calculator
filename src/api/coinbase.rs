@@ -145,7 +145,7 @@ impl CoinbaseClient {
                                     ask_array[0].as_str(),
                                     ask_array[1].as_str(),
                                 ) {
-                                    println!("[Coinbase] Snapshot ask: price_str={}, size_str={}", price_str, size_str);
+                                    // info!("[Coinbase] Snapshot ask: price_str={}, size_str={}", price_str, size_str);
                                     
                                     let price_opt = parse_price_cents(price_str);
                                     let quantity_opt = crate::util::parse_quantity_smallest_unit(size_str, 8);

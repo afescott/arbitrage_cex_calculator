@@ -85,20 +85,20 @@ impl ArbitrageDetector {
     /// Default detector with reasonable thresholds
     pub fn default() -> Self {
         Self::new(
-            1000,  // $10 minimum profit
-            10,    // 0.1% minimum profit percentage
-            100,   // 100ms max age
+            1000, // $10 minimum profit
+            10,   // 0.1% minimum profit percentage
+            100,  // 100ms max age
         )
     }
 
     /// Check for arbitrage opportunity when we want to buy
-    /// 
+    ///
     /// # Arguments
     /// * `our_bid_price` - Price we're willing to pay (in cents)
     /// * `our_exchange` - Exchange where we want to buy
     /// * `best_ask` - Best ask price and quantity available elsewhere (price, quantity, exchange)
     /// * `desired_quantity` - Quantity we want to trade
-    /// 
+    ///
     /// # Returns
     /// `Some(ArbitrageOpportunity)` if profitable opportunity exists, `None` otherwise
     pub fn check_buy_opportunity(
@@ -159,13 +159,13 @@ impl ArbitrageDetector {
     }
 
     /// Check for arbitrage opportunity when we want to sell
-    /// 
+    ///
     /// # Arguments
     /// * `our_ask_price` - Price we're willing to sell at (in cents)
     /// * `our_exchange` - Exchange where we want to sell
     /// * `best_bid` - Best bid price and quantity available elsewhere (price, quantity, exchange)
     /// * `desired_quantity` - Quantity we want to trade
-    /// 
+    ///
     /// # Returns
     /// `Some(ArbitrageOpportunity)` if profitable opportunity exists, `None` otherwise
     pub fn check_sell_opportunity(
@@ -177,6 +177,9 @@ impl ArbitrageDetector {
     ) -> Option<ArbitrageOpportunity> {
         let (best_bid_price, best_bid_quantity, best_bid_exchange) = best_bid?;
 
+        println!("Checking sell opportunity: our_ask_price={}, best_bid_price={}, best_bid_quantity={}, our_exchange={:?}, best_bid_exchange={:?}",
+            our_ask_price, best_bid_price, best_bid_quantity, our_exchange, best_bid_exchange
+        );
         // Can't arbitrage on same exchange
         if best_bid_exchange == our_exchange {
             return None;
@@ -260,10 +263,10 @@ mod tests {
 
         // We want to buy at $50,000, but can buy at $49,900 elsewhere
         let opportunity = detector.check_buy_opportunity(
-            5_000_000,              // $50,000 our bid
+            5_000_000, // $50,000 our bid
             Exchange::Binance,
             Some((4_990_000, 2_000_000, Exchange::Coinbase)), // $49,900 best ask, 0.02 BTC available
-            1_000_000,              // 0.01 BTC (in smallest units)
+            1_000_000,                                        // 0.01 BTC (in smallest units)
         );
 
         assert!(opportunity.is_some());
@@ -279,7 +282,7 @@ mod tests {
 
         // Best ask is higher than our bid - no opportunity
         let opportunity = detector.check_buy_opportunity(
-            5_000_000,              // $50,000 our bid
+            5_000_000, // $50,000 our bid
             Exchange::Binance,
             Some((5_010_000, 2_000_000, Exchange::Coinbase)), // $50,100 best ask (higher!)
             1_000_000,
@@ -294,10 +297,10 @@ mod tests {
 
         // Good price but insufficient liquidity
         let opportunity = detector.check_buy_opportunity(
-            5_000_000,              // $50,000 our bid
+            5_000_000, // $50,000 our bid
             Exchange::Binance,
             Some((4_990_000, 500_000, Exchange::Coinbase)), // $49,900 best ask, but only 0.005 BTC available
-            1_000_000,              // Need 0.01 BTC
+            1_000_000,                                      // Need 0.01 BTC
         );
 
         // Should be filtered out due to insufficient liquidity
@@ -310,7 +313,7 @@ mod tests {
 
         // We want to sell at $50,000, but can sell at $50,100 elsewhere
         let opportunity = detector.check_sell_opportunity(
-            5_000_000,              // $50,000 our ask
+            5_000_000, // $50,000 our ask
             Exchange::Binance,
             Some((5_010_000, 2_000_000, Exchange::Coinbase)), // $50,100 best bid, 0.02 BTC available
             1_000_000,
