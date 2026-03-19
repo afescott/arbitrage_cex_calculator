@@ -2,4 +2,4 @@ pub mod arbitrage;
 pub mod fees;
 
 pub use arbitrage::{ArbitrageOpportunity, ArbitrageDetector};
-pub use fees::{FeeCalculator, ExchangeFee};
+pub use fees::{ExchangeFee, FeeCalculator, RoutePnlEstimate};

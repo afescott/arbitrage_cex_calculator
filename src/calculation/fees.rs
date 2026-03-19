@@ -17,6 +17,22 @@ impl ExchangeFee {
 /// Fee calculator for different exchanges
 pub struct FeeCalculator;
 
+/// A compact estimate for a single cross-exchange round trip.
+/// Assumes one buy leg and one sell leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutePnlEstimate {
+    /// Trade size in cents (e.g. $10.00 => 1000)
+    pub notional_cents: u64,
+    /// Gross spread used for simulation (in basis points)
+    pub gross_spread_bps: u64,
+    /// Round-trip taker fees in cents
+    pub fees_cents: u64,
+    /// Gross PnL before fees in cents
+    pub gross_pnl_cents: u64,
+    /// Net PnL after fees in cents
+    pub net_pnl_cents: i64,
+}
+
 impl FeeCalculator {
     /// Get fee structure for a specific exchange
     pub fn get_exchange_fee(exchange: Exchange) -> ExchangeFee {
@@ -72,6 +88,44 @@ impl FeeCalculator {
         let order_value = price.saturating_mul(quantity);
         (order_value * fee_bps) / 10000
     }
+
+    /// Total taker fee rate for a two-leg cross-exchange arbitrage trade.
+    /// Returns basis points.
+    pub fn round_trip_taker_bps(buy_exchange: Exchange, sell_exchange: Exchange) -> u64 {
+        let buy_taker = Self::get_exchange_fee(buy_exchange).taker_bps;
+        let sell_taker = Self::get_exchange_fee(sell_exchange).taker_bps;
+        buy_taker + sell_taker
+    }
+
+    /// Minimum gross spread (in basis points) required to break even on fees
+    /// for a pure taker/taker round trip between exchanges.
+    pub fn min_break_even_spread_bps(buy_exchange: Exchange, sell_exchange: Exchange) -> u64 {
+        Self::round_trip_taker_bps(buy_exchange, sell_exchange)
+    }
+
+    /// Simulate net PnL for a round-trip arbitrage on a fixed notional.
+    ///
+    /// `gross_spread_bps` is the raw cross-exchange price difference in basis points.
+    /// Positive net PnL means the opportunity clears fees.
+    pub fn estimate_round_trip_pnl(
+        notional_cents: u64,
+        gross_spread_bps: u64,
+        buy_exchange: Exchange,
+        sell_exchange: Exchange,
+    ) -> RoutePnlEstimate {
+        let round_trip_fee_bps = Self::round_trip_taker_bps(buy_exchange, sell_exchange);
+        let fees_cents = (notional_cents.saturating_mul(round_trip_fee_bps)) / 10000;
+        let gross_pnl_cents = (notional_cents.saturating_mul(gross_spread_bps)) / 10000;
+        let net_pnl_cents = gross_pnl_cents as i64 - fees_cents as i64;
+
+        RoutePnlEstimate {
+            notional_cents,
+            gross_spread_bps,
+            fees_cents,
+            gross_pnl_cents,
+            net_pnl_cents,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -109,5 +163,37 @@ mod tests {
         assert_eq!(binance_fee.taker_bps, 20);
         assert_eq!(kraken_fee.taker_bps, 26);
         assert!(kraken_fee.taker_bps > binance_fee.taker_bps);
+    }
+
+    #[test]
+    fn test_min_break_even_spread_bps_for_routes() {
+        // Binance taker (20) + Kraken taker (26) = 46 bps => 0.46%
+        assert_eq!(
+            FeeCalculator::min_break_even_spread_bps(Exchange::Binance, Exchange::Kraken),
+            46
+        );
+
+        // Binance taker (20) + Hyperliquid taker (2) = 22 bps => 0.22%
+        assert_eq!(
+            FeeCalculator::min_break_even_spread_bps(Exchange::Binance, Exchange::Hyperliquid),
+            22
+        );
+    }
+
+    #[test]
+    fn test_ten_dollar_route_estimate() {
+        // $10 notional with Binance <-> Kraken route
+        let estimate = FeeCalculator::estimate_round_trip_pnl(
+            1_000, // $10.00 in cents
+            50,    // 0.50% gross spread
+            Exchange::Binance,
+            Exchange::Kraken,
+        );
+
+        // Gross PnL: $10 * 0.50% = $0.05
+        assert_eq!(estimate.gross_pnl_cents, 5);
+        // Fees: $10 * 0.46% = $0.046 => 4 cents (integer truncation)
+        assert_eq!(estimate.fees_cents, 4);
+        assert_eq!(estimate.net_pnl_cents, 1);
     }
 }
