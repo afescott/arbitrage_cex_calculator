@@ -8,7 +8,7 @@ use api::{BinanceClient, CoinbaseClient, ExchangePrice, HyperliquidClient, Krake
 use tracing::{info, Level};
 use tracing_subscriber;
 
-use crate::orderbook::book::OrderBook;
+use crate::{args::Bias, orderbook::book::OrderBook};
 
 #[tokio::main]
 async fn main() {
@@ -22,9 +22,14 @@ async fn main() {
     // Avoid unused warnings without printing secrets.
     let _ = args;
 
-    run("BTC/USDT".to_string()).await;
+    let pair = args.pair.unwrap_or_else(|| {
+        eprintln!("Invalid trading pair args");
+        std::process::exit(1);
+    });
+
+    run(pair, args.bias).await;
 }
-async fn run(order_book_name: String) {
+async fn run(order_book_name: String, bias: Bias) {
     // Initialize tracing for tokio-console compatibility
     tracing_subscriber::fmt()
         .with_max_level(Level::INFO)

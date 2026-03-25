@@ -141,6 +141,15 @@ impl FeeCalculator {
             net_pnl_cents,
         }
     }
+
+    /// Temporary placeholder used by `main.rs` while order execution is under development.
+    pub async fn run_purchase_simulation() {
+        // Keep the task alive to match the current "spawn and select!" pattern.
+        // Replace with real simulation/execution wiring later.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    }
 }
 
 #[cfg(test)]
