@@ -13,12 +13,103 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ::pricelevel::MatchResult;
+use ::pricelevel::{MatchResult, Side as PriceLevelSide};
 
 pub mod book;
 mod modifications;
 
 pub use modifications::OrderModification;
+
+use crate::api::{ExchangePrice, Side as ApiSide};
+
+/// Apply one exchange price update: arbitrage check, then merge into the book.
+fn apply_exchange_price_update(
+    orderbook: &book::OrderBook,
+    exchange: book::Exchange,
+    price: u64,
+    quantity: u64,
+    side: ApiSide,
+) {
+    let orderbook_side = match side {
+        ApiSide::Buy => PriceLevelSide::Buy,
+        ApiSide::Sell => PriceLevelSide::Sell,
+    };
+    orderbook.check_for_immediate_purchase(price, exchange, orderbook_side, quantity);
+    orderbook.add_exchange_price_level(price, exchange, orderbook_side, quantity);
+}
+
+/// Spawns a task that consumes [`ExchangePrice`] messages and updates [`book::OrderBook`].
+pub fn spawn_exchange_price_aggregator(
+    orderbook: book::OrderBook,
+    mut rx: tokio::sync::mpsc::Receiver<ExchangePrice>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(price) = rx.recv().await {
+            match price {
+                ExchangePrice::Binance {
+                    price,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
+                    side,
+                } => {
+                    apply_exchange_price_update(
+                        &orderbook,
+                        book::Exchange::Binance,
+                        price,
+                        quantity,
+                        side,
+                    );
+                }
+                ExchangePrice::Kraken {
+                    price,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
+                    side,
+                } => {
+                    apply_exchange_price_update(
+                        &orderbook,
+                        book::Exchange::Kraken,
+                        price,
+                        quantity,
+                        side,
+                    );
+                }
+                ExchangePrice::Coinbase {
+                    price,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
+                    side,
+                } => {
+                    apply_exchange_price_update(
+                        &orderbook,
+                        book::Exchange::Coinbase,
+                        price,
+                        quantity,
+                        side,
+                    );
+                }
+                ExchangePrice::Hyperliquid {
+                    price,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
+                    side,
+                } => {
+                    apply_exchange_price_update(
+                        &orderbook,
+                        book::Exchange::Hyperliquid,
+                        price,
+                        quantity,
+                        side,
+                    );
+                }
+            }
+        }
+    })
+}
 
 #[derive(Debug)]
 pub enum FillResponse {
@@ -33,25 +124,3 @@ pub fn current_time_millis() -> u64 {
         .expect("Time went backwards")
         .as_millis() as u64
 }
-
-/* #[cfg(test)]
-mod test {
-    use super::book::OrderBook;
-
-    #[test]
-    fn test_partial_fill() {
-        let order_book = OrderBook::new("BTCUSD".to_string());
-
-        let order_id = pricelevel::OrderId::default();
-
-        let price = 1000;
-        let quantity = 10;
-        let _ = order_book
-            .add_to_limit_order(order_id, price, quantity, pricelevel::Side::Buy)
-            .unwrap();
-
-        let _ = order_book
-            .submit_market_order(pricelevel::OrderId::default(), 5, pricelevel::Side::Sell)
-            .unwrap();
-    }
-} */

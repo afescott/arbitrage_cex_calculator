@@ -12,6 +12,16 @@ use crate::orderbook::book::OrderBook;
 
 #[tokio::main]
 async fn main() {
+    // Parse CLI credentials once at startup.
+    // (Clients currently only use websockets for market data, so secrets aren't
+    // consumed yet, but wiring this in makes later order execution work easier.)
+    let args = crate::args::Args::from_env().unwrap_or_else(|e| {
+        eprintln!("Argument error: {e}");
+        std::process::exit(1);
+    });
+    // Avoid unused warnings without printing secrets.
+    let _ = args;
+
     run("BTC/USDT".to_string()).await;
 }
 async fn run(order_book_name: String) {
@@ -23,7 +33,7 @@ async fn run(order_book_name: String) {
 
     // info!("Starting low-latency order book aggregator...");
     // info!("Monitoring BTC/USDT pair across multiple exchanges");
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<ExchangePrice>(1000);
+    let (tx, rx) = tokio::sync::mpsc::channel::<ExchangePrice>(1000);
 
     // Spawn tasks for each exchange
     let binance_tx = tx.clone();
@@ -49,113 +59,10 @@ async fn run(order_book_name: String) {
     });
 
     let orderbook = OrderBook::new(order_book_name.to_string());
-    let aggregator_handle = tokio::spawn(async move {
-        while let Some(price) = rx.recv().await {
-            match price {
-                ExchangePrice::Binance {
-                    price,
-                    quantity,
-                    exchange_timestamp: _,
-                    received_at: _,
-                    side,
-                } => {
-                    // Convert api::Side to pricelevel::Side
-                    let orderbook_side = match side {
-                        api::Side::Buy => pricelevel::Side::Buy,
-                        api::Side::Sell => pricelevel::Side::Sell,
-                    };
-                    orderbook.check_for_immediate_purchase(
-                        price,
-                        orderbook::book::Exchange::Binance,
-                        orderbook_side,
-                        quantity,
-                    );
+    let aggregator_handle = crate::orderbook::spawn_exchange_price_aggregator(orderbook, rx);
 
-                    orderbook.add_exchange_price_level(
-                        price,
-                        orderbook::book::Exchange::Binance,
-                        orderbook_side,
-                        quantity,
-                    );
-                }
-                ExchangePrice::Kraken {
-                    price,
-                    quantity,
-                    exchange_timestamp: _,
-                    received_at: _,
-                    side,
-                } => {
-                    // Convert api::Side to pricelevel::Side
-                    let orderbook_side = match side {
-                        api::Side::Buy => pricelevel::Side::Buy,
-                        api::Side::Sell => pricelevel::Side::Sell,
-                    };
-                    orderbook.check_for_immediate_purchase(
-                        price,
-                        orderbook::book::Exchange::Kraken,
-                        orderbook_side,
-                        quantity,
-                    );
-                    orderbook.add_exchange_price_level(
-                        price,
-                        orderbook::book::Exchange::Kraken,
-                        orderbook_side,
-                        quantity,
-                    );
-                }
-                ExchangePrice::Coinbase {
-                    price,
-                    quantity,
-                    exchange_timestamp: _,
-                    received_at: _,
-                    side,
-                } => {
-                    // Convert api::Side to pricelevel::Side
-                    let orderbook_side = match side {
-                        api::Side::Buy => pricelevel::Side::Buy,
-                        api::Side::Sell => pricelevel::Side::Sell,
-                    };
-                    orderbook.check_for_immediate_purchase(
-                        price,
-                        orderbook::book::Exchange::Coinbase,
-                        orderbook_side,
-                        quantity,
-                    );
-                    orderbook.add_exchange_price_level(
-                        price,
-                        orderbook::book::Exchange::Coinbase,
-                        orderbook_side,
-                        quantity,
-                    );
-                }
-                ExchangePrice::Hyperliquid {
-                    price,
-                    quantity,
-                    exchange_timestamp: _,
-                    received_at: _,
-                    side,
-                } => {
-                    // Convert api::Side to pricelevel::Side
-                    let orderbook_side = match side {
-                        api::Side::Buy => pricelevel::Side::Buy,
-                        api::Side::Sell => pricelevel::Side::Sell,
-                    };
-                    orderbook.check_for_immediate_purchase(
-                        price,
-                        orderbook::book::Exchange::Hyperliquid,
-                        orderbook_side,
-                        quantity,
-                    );
-                    orderbook.add_exchange_price_level(
-                        price,
-                        orderbook::book::Exchange::Hyperliquid,
-                        orderbook_side,
-                        quantity,
-                    );
-                }
-            }
-            // Here you could implement more complex aggregation logic
-        }
+    let purchase_handle = tokio::spawn(async move {
+        crate::calculation::fees::FeeCalculator::run_purchase_simulation().await;
     });
 
     // Wait for all tasks (they run indefinitely)

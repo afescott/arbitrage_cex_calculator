@@ -4,18 +4,18 @@ use crate::orderbook::book::Exchange;
 /// Typical fees: Maker 0.1% = 10 bps, Taker 0.2% = 20 bps
 #[derive(Debug, Clone, Copy)]
 pub struct ExchangeFee {
-    pub maker_bps: u64,  // Maker fee in basis points
-    pub taker_bps: u64,  // Taker fee in basis points
+    pub maker_bps: u64, // Maker fee in basis points
+    pub taker_bps: u64, // Taker fee in basis points
 }
 
 impl ExchangeFee {
     pub fn new(maker_bps: u64, taker_bps: u64) -> Self {
-        Self { maker_bps, taker_bps }
+        Self {
+            maker_bps,
+            taker_bps,
+        }
     }
 }
-
-/// Fee calculator for different exchanges
-pub struct FeeCalculator;
 
 /// A compact estimate for a single cross-exchange round trip.
 /// Assumes one buy leg and one sell leg.
@@ -33,27 +33,38 @@ pub struct RoutePnlEstimate {
     pub net_pnl_cents: i64,
 }
 
+pub struct PurchaseOption {
+    exchange_type_price: (Exchange, u64),
+    others: [Exchange; 2],
+}
+
+/// Fee calculator for different exchanges
+///
+pub struct FeeCalculator {
+    rx: tokio::sync::mpsc::Receiver<PurchaseOption>,
+}
+
 impl FeeCalculator {
     /// Get fee structure for a specific exchange
     pub fn get_exchange_fee(exchange: Exchange) -> ExchangeFee {
         match exchange {
-            Exchange::Binance => ExchangeFee::new(10, 20),  // 0.1% maker, 0.2% taker
+            Exchange::Binance => ExchangeFee::new(10, 20), // 0.1% maker, 0.2% taker
             Exchange::Coinbase => ExchangeFee::new(10, 20), // 0.1% maker, 0.2% taker
-            Exchange::Kraken => ExchangeFee::new(16, 26),   // 0.16% maker, 0.26% taker
+            Exchange::Kraken => ExchangeFee::new(16, 26),  // 0.16% maker, 0.26% taker
             Exchange::Hyperliquid => ExchangeFee::new(2, 2), // 0.02% maker/taker (very low fees!)
         }
     }
 
     /// Calculate total fees for a buy and sell order
     /// For arbitrage, we typically use taker fees on both sides (market orders)
-    /// 
+    ///
     /// # Arguments
     /// * `buy_price` - Price per unit for buy order (in cents)
     /// * `sell_price` - Price per unit for sell order (in cents)
     /// * `quantity` - Quantity to trade
     /// * `buy_exchange` - Exchange where we buy
     /// * `sell_exchange` - Exchange where we sell
-    /// 
+    ///
     /// # Returns
     /// Total fees in cents
     pub fn calculate_total_fees(
@@ -84,7 +95,11 @@ impl FeeCalculator {
         is_taker: bool,
     ) -> u64 {
         let fee = Self::get_exchange_fee(exchange);
-        let fee_bps = if is_taker { fee.taker_bps } else { fee.maker_bps };
+        let fee_bps = if is_taker {
+            fee.taker_bps
+        } else {
+            fee.maker_bps
+        };
         let order_value = price.saturating_mul(quantity);
         (order_value * fee_bps) / 10000
     }
