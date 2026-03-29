@@ -22,6 +22,37 @@ cargo flamegraph --bin security_flamegraph_lowlatency
 RUSTFLAGS="-C force-frame-pointers=y" cargo run --bin security_flamegraph_lowlatency
 ```
 
+## Run (CLI)
+
+Arguments after `--` are passed to the binary. `--pair` is required; `--bias` defaults to `buy` and `--budget` defaults to `10` (USD).
+
+```bash
+# Minimal
+cargo run -- --pair HYPE/USDT
+
+# Explicit buy bias and $10 budget (same as defaults)
+cargo run -- --pair HYPE/USDT --bias buy --budget 10
+
+# Sell bias, $50 budget
+cargo run -- --pair HYPE/USDT --bias sell --budget 50
+```
+
+Optional exchange credentials (prefer env vars or a secrets manager in production—CLI args can show up in process listings):
+
+```bash
+cargo run -- \
+  --pair HYPE/USDT \
+  --bias buy \
+  --budget 10 \
+  --hyperliquid-private-key YOUR_HL_PRIVATE_KEY \
+  --kraken-api-key YOUR_KRAKEN_KEY \
+  --kraken-api-secret YOUR_KRAKEN_SECRET \
+  --binance-api-key YOUR_BINANCE_KEY \
+  --binance-api-secret YOUR_BINANCE_SECRET
+```
+
+Supported flags: `--pair`, `--bias` (`buy` | `sell`), `--budget` (integer USD), `--hyperliquid-private-key`, `--kraken-api-key`, `--kraken-api-secret`, `--binance-api-key`, `--binance-api-secret`.
+
 ## Development Tools
 
 ### Flamegraph
