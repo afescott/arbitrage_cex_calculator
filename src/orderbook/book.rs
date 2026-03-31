@@ -11,6 +11,7 @@
 //! The implementation uses concurrent data structures to support high-throughput
 //! order processing in a multi-threaded environment.
 
+use crate::calculation::{fees::PurchaseOption, ArbitrageDetector};
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use pricelevel::{OrderId, PriceLevel, Side, UuidGenerator};
@@ -18,8 +19,8 @@ use std::{
     collections::BTreeMap,
     sync::{atomic::AtomicU64, Arc, RwLock},
 };
+use tracing::info;
 use uuid::Uuid;
-use crate::calculation::ArbitrageDetector;
 
 #[warn(clippy::too_many_lines)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +69,7 @@ pub struct OrderBook {
     /// Best ask across all exchanges. Returns None if no data available.
     /// The tuple contains (exchange, price, quantity), where price of 0 means no data.
     pub best_ask_all_exchanges: Arc<std::sync::Mutex<(Exchange, BestPriceLevel)>>,
-    
+
     /// Arbitrage detector for identifying profitable opportunities
     arbitrage_detector: ArbitrageDetector,
 }
@@ -165,39 +166,32 @@ impl OrderBook {
         bids_depth >= min_levels && asks_depth >= min_levels
     }
 
-    pub fn check_for_immediate_purchase(
+    pub async fn check_for_immediate_purchase(
         &self,
         price: u64,
         exchange: Exchange,
         side: Side,
         quantity: u64,
+        tx: &tokio::sync::mpsc::Sender<(Exchange, u64)>,
     ) {
         // Only proceed if orderbook has established depth (at least 3 price levels on each side)
         const MIN_DEPTH_LEVELS: usize = 3;
         if !self.has_sufficient_depth(exchange, MIN_DEPTH_LEVELS) {
             return;
         }
-        
+
         let opportunity = match side {
             Side::Buy => {
                 // We want to buy at this exchange, check if we can buy cheaper elsewhere
                 let best_ask = self.best_ask_all_exchanges();
-                self.arbitrage_detector.check_buy_opportunity(
-                    price,
-                    exchange,
-                    best_ask,
-                    quantity,
-                )
+                self.arbitrage_detector
+                    .check_buy_opportunity(price, exchange, best_ask, quantity)
             }
             Side::Sell => {
                 // We want to sell at this exchange, check if we can sell higher elsewhere
                 let best_bid = self.best_bid_all_exchanges();
-                self.arbitrage_detector.check_sell_opportunity(
-                    price,
-                    exchange,
-                    best_bid,
-                    quantity,
-                )
+                self.arbitrage_detector
+                    .check_sell_opportunity(price, exchange, best_bid, quantity)
             }
         };
 
@@ -213,6 +207,9 @@ impl OrderBook {
                 opportunity.profit_bps() as f64 / 100.0,
                 opportunity.quantity as f64 / 100_000_000.0
             );
+            tx.send((exchange, price))
+                .await
+                .unwrap_or_else(|e| eprintln!("Failed to send arbitrage opportunity: {}", e));
         }
     }
 
@@ -249,7 +246,6 @@ impl OrderBook {
                     .exchange_asks_price_level
                     .entry(exchange)
                     .or_insert_with(|| Arc::new(RwLock::new(BTreeMap::new())));
-
 
                 let mut guard = match (*price_level.value()).write() {
                     Ok(guard) => guard,

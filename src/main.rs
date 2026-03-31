@@ -8,7 +8,7 @@ use api::{BinanceClient, CoinbaseClient, ExchangePrice, HyperliquidClient, Krake
 use tracing::{info, Level};
 use tracing_subscriber;
 
-use crate::{args::Bias, orderbook::book::OrderBook};
+use crate::{args::Bias, calculation::FeeCalculator, orderbook::book::OrderBook};
 
 #[tokio::main]
 async fn main() {
@@ -63,11 +63,15 @@ async fn run(order_book_name: String, bias: Bias) {
             .await;
     });
 
+    let (tx_purchase, rx_purchase) = tokio::sync::mpsc::channel(50);
+
     let orderbook = OrderBook::new(order_book_name.to_string());
-    let aggregator_handle = crate::orderbook::spawn_exchange_price_aggregator(orderbook, rx);
+    let aggregator_handle =
+        crate::orderbook::spawn_exchange_price_aggregator(orderbook, rx, tx_purchase);
 
     let purchase_handle = tokio::spawn(async move {
-        crate::calculation::fees::FeeCalculator::run_purchase_simulation().await;
+        let mut fee = FeeCalculator::new(rx_purchase);
+        fee.run_purchase_simulation();
     });
 
     // Wait for all tasks (they run indefinitely)

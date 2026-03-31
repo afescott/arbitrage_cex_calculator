@@ -33,20 +33,25 @@ pub struct RoutePnlEstimate {
     pub net_pnl_cents: i64,
 }
 
+//might cause delay maybe use slice?
 pub struct PurchaseOption {
     exchange_type_price: (Exchange, u64),
-    others: [Exchange; 2],
+    // TODO: right now ignore the others
+    /*     others: [Exchange; 2], */
 }
 
 /// Fee calculator for different exchanges
 ///
 pub struct FeeCalculator {
-    rx: tokio::sync::mpsc::Receiver<PurchaseOption>,
+    rx: tokio::sync::mpsc::Receiver<(Exchange, u64)>,
 }
 
 impl FeeCalculator {
+    pub fn new(rx: tokio::sync::mpsc::Receiver<(Exchange, u64)>) -> Self {
+        Self { rx }
+    }
     /// Get fee structure for a specific exchange
-    pub fn get_exchange_fee(exchange: Exchange) -> ExchangeFee {
+    fn get_exchange_fee(exchange: Exchange) -> ExchangeFee {
         match exchange {
             Exchange::Binance => ExchangeFee::new(10, 20), // 0.1% maker, 0.2% taker
             Exchange::Coinbase => ExchangeFee::new(10, 20), // 0.1% maker, 0.2% taker
@@ -144,8 +149,7 @@ impl FeeCalculator {
 
     /// Temporary placeholder used by `main.rs` while order execution is under development.
     pub async fn run_purchase_simulation(&mut self) {
-        while let Some(purchase_option) = self.rx.recv().await {
-            let btc_quote = purchase_option.exchange_type_price.1;
+        while let Some((_exchange, _btc_quote)) = self.rx.recv().await {
         }
     }
 }
