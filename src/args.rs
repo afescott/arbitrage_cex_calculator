@@ -1,3 +1,6 @@
+//! CLI and execution configuration (credentials reserved for future trading paths).
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]

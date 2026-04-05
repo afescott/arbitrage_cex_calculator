@@ -1,3 +1,6 @@
+//! Exchange WebSocket clients and shared price types.
+#![allow(dead_code)]
+
 pub mod binance;
 pub mod coinbase;
 pub mod hyperliquid;

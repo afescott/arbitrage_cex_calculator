@@ -5,7 +5,7 @@ mod orderbook;
 mod util;
 
 use api::{BinanceClient, CoinbaseClient, ExchangePrice, HyperliquidClient, KrakenClient};
-use tracing::{info, Level};
+use tracing::Level;
 use tracing_subscriber;
 
 use crate::{args::Bias, calculation::FeeCalculator, orderbook::book::OrderBook};
@@ -71,7 +71,7 @@ async fn run(order_book_name: String, bias: Bias) {
 
     let purchase_handle = tokio::spawn(async move {
         let mut fee = FeeCalculator::new(rx_purchase);
-        fee.run_purchase_simulation();
+        fee.run_purchase_simulation().await;
     });
 
     // Wait for all tasks (they run indefinitely)

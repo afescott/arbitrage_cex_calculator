@@ -2,7 +2,6 @@ use crate::{api::{ExchangePrice, Side}, util::parse_price_cents};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{error, info, warn};
 
 const KRAKEN_WS_URL: &str = "wss://ws.kraken.com";
 

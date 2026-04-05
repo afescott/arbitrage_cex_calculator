@@ -1,3 +1,7 @@
+//! Fee tables and simulation helpers (some items are exercised only from unit tests).
+#![allow(dead_code)]
+
+use super::arbitrage::BuyExchangeSellExchange;
 use crate::orderbook::book::Exchange;
 
 /// Exchange fee structure - fees are in basis points (1 basis point = 0.01%)
@@ -33,21 +37,14 @@ pub struct RoutePnlEstimate {
     pub net_pnl_cents: i64,
 }
 
-//might cause delay maybe use slice?
-pub struct PurchaseOption {
-    exchange_type_price: (Exchange, u64),
-    // TODO: right now ignore the others
-    /*     others: [Exchange; 2], */
-}
-
 /// Fee calculator for different exchanges
 ///
 pub struct FeeCalculator {
-    rx: tokio::sync::mpsc::Receiver<(Exchange, u64)>,
+    rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>,
 }
 
 impl FeeCalculator {
-    pub fn new(rx: tokio::sync::mpsc::Receiver<(Exchange, u64)>) -> Self {
+    pub fn new(rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>) -> Self {
         Self { rx }
     }
     /// Get fee structure for a specific exchange
@@ -94,7 +91,6 @@ impl FeeCalculator {
 
     /// Calculate fees for a single order
     pub fn calculate_order_fee(
-        &self,
         price: u64,
         quantity: u64,
         exchange: Exchange,
@@ -118,12 +114,17 @@ impl FeeCalculator {
         buy_taker + sell_taker
     }
 
+    /// Minimum gross spread (in basis points) required to break even on fees
+    /// for a pure taker/taker round trip between exchanges.
+    pub fn min_break_even_spread_bps(buy_exchange: Exchange, sell_exchange: Exchange) -> u64 {
+        Self::round_trip_taker_bps(buy_exchange, sell_exchange)
+    }
+
     /// Simulate net PnL for a round-trip arbitrage on a fixed notional.
     ///
     /// `gross_spread_bps` is the raw cross-exchange price difference in basis points.
     /// Positive net PnL means the opportunity clears fees.
     pub fn estimate_round_trip_pnl(
-        &self,
         notional_cents: u64,
         gross_spread_bps: u64,
         buy_exchange: Exchange,
@@ -145,10 +146,8 @@ impl FeeCalculator {
 
     /// Temporary placeholder used by `main.rs` while order execution is under development.
     pub async fn run_purchase_simulation(&mut self) {
-        while let Some((exchange, btc_quote)) = self.rx.recv().await {
-            // What's next? Well pretty sure we need to
-
-            self.calculate_order_fee(btc_quote, unimplemented!(), exchange, unimplemented!());
+        while let Some(_route) = self.rx.recv().await {
+            // Fee simulation / execution wiring goes here.
         }
     }
 }
@@ -207,9 +206,8 @@ mod tests {
 
     #[test]
     fn test_ten_dollar_route_estimate() {
-        let fee_calc = FeeCalculator::new(unimplemented!());
         // $10 notional with Binance <-> Kraken route
-        let estimate = fee_calc.estimate_round_trip_pnl(
+        let estimate = FeeCalculator::estimate_round_trip_pnl(
             1_000, // $10.00 in cents
             50,    // 0.50% gross spread
             Exchange::Binance,

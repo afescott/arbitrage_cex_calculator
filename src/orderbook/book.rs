@@ -11,19 +11,15 @@
 //! The implementation uses concurrent data structures to support high-throughput
 //! order processing in a multi-threaded environment.
 
-use crate::{
-    calculation::{fees::PurchaseOption, ArbitrageDetector},
-    orderbook::BuyExchangeSellExchange,
-};
-use crossbeam_queue::SegQueue;
+#![allow(dead_code)]
+
+use crate::calculation::{ArbitrageDetector, BuyExchangeSellExchange};
 use dashmap::DashMap;
-use pricelevel::{OrderId, PriceLevel, Side, UuidGenerator};
+use pricelevel::{OrderId, Side};
 use std::{
     collections::BTreeMap,
     sync::{atomic::AtomicU64, Arc, RwLock},
 };
-use tracing::info;
-use uuid::Uuid;
 
 #[warn(clippy::too_many_lines)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,12 +207,6 @@ impl OrderBook {
                 opportunity.quantity as f64 / 100_000_000.0
             );
 
-            let buy_price = opportunity.buy_price as f64 / 100.0;
-            let profit_expect = opportunity.profit_bps() as f64 / 100.0;
-            let sell_price = opportunity.sell_price as f64 / 100.0;
-            let sell_exchange = opportunity.sell_exchange;
-            let buy_exchange = opportunity.buy_exchange;
-
             let buy_exchange_sell_exchange = BuyExchangeSellExchange {
                 buy_price: opportunity.buy_price,
                 profit_expect: opportunity.profit_bps(),
@@ -344,10 +334,9 @@ impl OrderBook {
 
 #[cfg(test)]
 mod test {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     use pricelevel::Side;
-    use tokio::sync::mpsc::channel;
 
     use crate::orderbook::book::{Exchange, OrderBook};
 
@@ -450,7 +439,7 @@ mod test {
             book_2.add_exchange_price_level(2000, Exchange::Binance, Side::Sell, 13);
         });
 
-        tokio::join!(task_1, task_2);
+        let _ = tokio::join!(task_1, task_2);
 
         // After both tasks complete, check that quantities accumulated
         let price_level = order_book

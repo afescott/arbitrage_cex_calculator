@@ -1,3 +1,6 @@
+//! Arbitrage detection and route payloads.
+#![allow(dead_code)]
+
 use crate::orderbook::book::Exchange;
 use std::time::Instant;
 
@@ -61,6 +64,16 @@ impl ArbitrageOpportunity {
     pub fn is_stale(&self, max_age_ms: u64) -> bool {
         self.age_ms > max_age_ms
     }
+}
+
+/// Route snapshot for downstream fee / execution logic. Prices are in cents; `profit_expect` is basis points.
+#[derive(Debug, Clone, Copy)]
+pub struct BuyExchangeSellExchange {
+    pub buy_price: u64,
+    pub profit_expect: u64,
+    pub sell_price: u64,
+    pub sell_exchange: Exchange,
+    pub buy_exchange: Exchange,
 }
 
 /// Arbitrage detection logic
@@ -177,9 +190,6 @@ impl ArbitrageDetector {
     ) -> Option<ArbitrageOpportunity> {
         let (best_bid_price, best_bid_quantity, best_bid_exchange) = best_bid?;
 
-        println!("Checking sell opportunity: our_ask_price={}, best_bid_price={}, best_bid_quantity={}, our_exchange={:?}, best_bid_exchange={:?}",
-            our_ask_price, best_bid_price, best_bid_quantity, our_exchange, best_bid_exchange
-        );
         // Can't arbitrage on same exchange
         if best_bid_exchange == our_exchange {
             return None;
@@ -261,11 +271,11 @@ mod tests {
     fn test_buy_opportunity_profitable() {
         let detector = ArbitrageDetector::default();
 
-        // We want to buy at $50,000, but can buy at $49,900 elsewhere
+        // We want to buy at $50,000, but can buy at $49,700 elsewhere (spread must clear ~40 bps taker/taker)
         let opportunity = detector.check_buy_opportunity(
             5_000_000, // $50,000 our bid
             Exchange::Binance,
-            Some((4_990_000, 2_000_000, Exchange::Coinbase)), // $49,900 best ask, 0.02 BTC available
+            Some((4_970_000, 2_000_000, Exchange::Coinbase)), // $49,700 best ask, 0.02 BTC available
             1_000_000,                                        // 0.01 BTC (in smallest units)
         );
 
@@ -311,11 +321,11 @@ mod tests {
     fn test_sell_opportunity_profitable() {
         let detector = ArbitrageDetector::default();
 
-        // We want to sell at $50,000, but can sell at $50,100 elsewhere
+        // We want to sell at $50,000, but can sell at $50,300 elsewhere (spread must clear fees)
         let opportunity = detector.check_sell_opportunity(
             5_000_000, // $50,000 our ask
             Exchange::Binance,
-            Some((5_010_000, 2_000_000, Exchange::Coinbase)), // $50,100 best bid, 0.02 BTC available
+            Some((5_030_000, 2_000_000, Exchange::Coinbase)), // $50,300 best bid, 0.02 BTC available
             1_000_000,
         );
 

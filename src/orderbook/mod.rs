@@ -10,6 +10,7 @@
 //!
 //! The module uses concurrent data structures for high-performance order processing
 //! and supports both limit and market order types.
+#![allow(dead_code)]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,21 +19,10 @@ use ::pricelevel::{MatchResult, Side as PriceLevelSide};
 pub mod book;
 mod modifications;
 
-pub use modifications::OrderModification;
-
 use crate::{
     api::{ExchangePrice, Side as ApiSide},
-    calculation::fees::PurchaseOption,
-    orderbook::book::Exchange,
+    calculation::BuyExchangeSellExchange,
 };
-
-pub struct BuyExchangeSellExchange {
-    buy_price: u64,
-    profit_expect: u64,
-    sell_price: u64,
-    sell_exchange: Exchange,
-    buy_exchange: Exchange,
-}
 
 /// Apply one exchange price update: arbitrage check, then merge into the book.
 async fn apply_exchange_price_update(
@@ -57,7 +47,7 @@ async fn apply_exchange_price_update(
 pub fn spawn_exchange_price_aggregator(
     orderbook: book::OrderBook,
     mut rx: tokio::sync::mpsc::Receiver<ExchangePrice>,
-    tx: tokio::sync::mpsc::Sender<(book::Exchange, u64)>,
+    tx: tokio::sync::mpsc::Sender<BuyExchangeSellExchange>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(price) = rx.recv().await {
@@ -130,7 +120,6 @@ pub fn spawn_exchange_price_aggregator(
                     )
                     .await;
                 }
-                _ => {} // For now, we only process Hyperliquid prices. In the future, we can add support for other exchanges.
             }
         }
     })

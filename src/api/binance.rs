@@ -1,8 +1,7 @@
 use crate::{api::{ExchangePrice, Side}, util::parse_price_cents};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{error, info, warn};
 
 // Using regular depth stream - @depth20@100ms sends aggregated updates which might have different format
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws/btcusdt@depth20@100ms";
