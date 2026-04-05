@@ -11,7 +11,10 @@
 //! The implementation uses concurrent data structures to support high-throughput
 //! order processing in a multi-threaded environment.
 
-use crate::calculation::{fees::PurchaseOption, ArbitrageDetector};
+use crate::{
+    calculation::{fees::PurchaseOption, ArbitrageDetector},
+    orderbook::BuyExchangeSellExchange,
+};
 use crossbeam_queue::SegQueue;
 use dashmap::DashMap;
 use pricelevel::{OrderId, PriceLevel, Side, UuidGenerator};
@@ -172,7 +175,7 @@ impl OrderBook {
         exchange: Exchange,
         side: Side,
         quantity: u64,
-        tx: &tokio::sync::mpsc::Sender<(Exchange, u64)>,
+        tx: &tokio::sync::mpsc::Sender<BuyExchangeSellExchange>,
     ) {
         // Only proceed if orderbook has established depth (at least 3 price levels on each side)
         const MIN_DEPTH_LEVELS: usize = 3;
@@ -207,7 +210,22 @@ impl OrderBook {
                 opportunity.profit_bps() as f64 / 100.0,
                 opportunity.quantity as f64 / 100_000_000.0
             );
-            tx.send((exchange, price))
+
+            let buy_price = opportunity.buy_price as f64 / 100.0;
+            let profit_expect = opportunity.profit_bps() as f64 / 100.0;
+            let sell_price = opportunity.sell_price as f64 / 100.0;
+            let sell_exchange = opportunity.sell_exchange;
+            let buy_exchange = opportunity.buy_exchange;
+
+            let buy_exchange_sell_exchange = BuyExchangeSellExchange {
+                buy_price: opportunity.buy_price,
+                profit_expect: opportunity.profit_bps(),
+                sell_price: opportunity.sell_price,
+                sell_exchange: opportunity.sell_exchange,
+                buy_exchange: opportunity.buy_exchange,
+            };
+            //TODO: Struct this and use profit bps vs actual profit comparison
+            tx.send(buy_exchange_sell_exchange)
                 .await
                 .unwrap_or_else(|e| eprintln!("Failed to send arbitrage opportunity: {}", e));
         }

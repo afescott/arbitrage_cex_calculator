@@ -26,6 +26,14 @@ use crate::{
     orderbook::book::Exchange,
 };
 
+pub struct BuyExchangeSellExchange {
+    buy_price: u64,
+    profit_expect: u64,
+    sell_price: u64,
+    sell_exchange: Exchange,
+    buy_exchange: Exchange,
+}
+
 /// Apply one exchange price update: arbitrage check, then merge into the book.
 async fn apply_exchange_price_update(
     orderbook: &book::OrderBook,
@@ -33,7 +41,7 @@ async fn apply_exchange_price_update(
     price: u64,
     quantity: u64,
     side: ApiSide,
-    tx: &tokio::sync::mpsc::Sender<(Exchange, u64)>,
+    tx: &tokio::sync::mpsc::Sender<BuyExchangeSellExchange>,
 ) {
     let orderbook_side = match side {
         ApiSide::Buy => PriceLevelSide::Buy,
