@@ -44,7 +44,7 @@ impl ArbitrageOpportunity {
             sell_exchange,
             buy_price,
             sell_price,
-            profit_cents: net_profit,
+            profit_cents: net_profit / 100_000_000,
             gross_profit_cents: gross_profit,
             quantity,
             detected_at,
@@ -158,6 +158,10 @@ impl ArbitrageDetector {
         if !self.is_profitable(net_profit, gross_profit_total, best_ask_price) {
             return None;
         }
+
+        println!("Net profit after fees: {} cents", net_profit);
+
+        println!("Gross profit per unit: {} cents", gross_profit);
 
         Some(ArbitrageOpportunity::new(
             best_ask_exchange,

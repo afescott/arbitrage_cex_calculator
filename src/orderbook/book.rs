@@ -196,16 +196,10 @@ impl OrderBook {
 
         if let Some(opportunity) = opportunity {
             // Single println! for all arbitrage opportunities
-            println!(
-                "🚀 ARBITRAGE OPPORTUNITY DETECTED! Buy on {:?} at ${:.2}, Sell on {:?} at ${:.2}, Profit: ${:.2} ({:.2} bps), Qty: {:.8} BTC",
-                opportunity.buy_exchange,
-                opportunity.buy_price as f64 / 100.0,
-                opportunity.sell_exchange,
-                opportunity.sell_price as f64 / 100.0,
-                opportunity.profit_cents as f64 / 100.0,
-                opportunity.profit_bps() as f64 / 100.0,
-                opportunity.quantity as f64 / 100_000_000.0
-            );
+
+            println!("Arbitrage Opportunity: Buy on {:?} at {:.4}CENTS, Sell on {:?} at ${:.4}, profit: {:?}CENTS bps : ${:?}",
+ opportunity.buy_exchange, opportunity.buy_price as f64, opportunity.sell_exchange, opportunity.sell_price as f64,
+              opportunity.profit_cents,                       opportunity.profit_bps(),);
 
             let buy_exchange_sell_exchange = BuyExchangeSellExchange {
                 buy_price: opportunity.buy_price,
