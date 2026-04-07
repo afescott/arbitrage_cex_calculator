@@ -3,6 +3,7 @@
 
 pub mod binance;
 pub mod coinbase;
+pub mod execution;
 pub mod hyperliquid;
 pub mod kraken;
 

@@ -2,13 +2,14 @@ mod api;
 mod args;
 mod calculation;
 mod orderbook;
+mod purchase;
 mod util;
 
 use api::{BinanceClient, CoinbaseClient, ExchangePrice, HyperliquidClient, KrakenClient};
 use tracing::Level;
 use tracing_subscriber;
 
-use crate::{args::Bias, calculation::FeeCalculator, orderbook::book::OrderBook};
+use crate::{args::Args, orderbook::book::OrderBook, purchase::PurchaseManager};
 
 #[tokio::main]
 async fn main() {
@@ -19,17 +20,15 @@ async fn main() {
         eprintln!("Argument error: {e}");
         std::process::exit(1);
     });
-    // Avoid unused warnings without printing secrets.
-    let _ = args;
 
-    let pair = args.pair.unwrap_or_else(|| {
+    let pair = args.pair.clone().unwrap_or_else(|| {
         eprintln!("Invalid trading pair args");
         std::process::exit(1);
     });
 
-    run(pair, args.bias).await;
+    run(pair, args).await;
 }
-async fn run(order_book_name: String, bias: Bias) {
+async fn run(order_book_name: String, args: Args) {
     // Initialize tracing for tokio-console compatibility
     tracing_subscriber::fmt()
         .with_max_level(Level::INFO)
@@ -65,13 +64,14 @@ async fn run(order_book_name: String, bias: Bias) {
 
     let (tx_purchase, rx_purchase) = tokio::sync::mpsc::channel(50);
 
-    let orderbook = OrderBook::new(order_book_name.to_string());
+    let orderbook = OrderBook::new(order_book_name);
+
     let aggregator_handle =
         crate::orderbook::spawn_exchange_price_aggregator(orderbook, rx, tx_purchase);
 
     let purchase_handle = tokio::spawn(async move {
-        let mut fee = FeeCalculator::new(rx_purchase);
-        fee.run_purchase_simulation().await;
+        let mut pm = PurchaseManager::new(rx_purchase, args);
+        pm.run_purchase_simulation().await;
     });
 
     // Wait for all tasks (they run indefinitely)

@@ -50,10 +50,12 @@ impl FeeCalculator {
     /// Get fee structure for a specific exchange
     fn get_exchange_fee(exchange: Exchange) -> ExchangeFee {
         match exchange {
-            Exchange::Binance => ExchangeFee::new(10, 20), // 0.1% maker, 0.2% taker
-            Exchange::Coinbase => ExchangeFee::new(10, 20), // 0.1% maker, 0.2% taker
-            Exchange::Kraken => ExchangeFee::new(16, 26),  // 0.16% maker, 0.26% taker
-            Exchange::Hyperliquid => ExchangeFee::new(2, 2), // 0.02% maker/taker (very low fees!)
+            // Perpetual futures baseline fees (maker/taker), stored in basis points.
+            // Note: Some venues publish fractional-bps schedules; we round up to whole bps here.
+            Exchange::Binance => ExchangeFee::new(2, 5), // 0.02% maker, 0.05% taker (USD-M futures VIP0)
+            Exchange::Coinbase => ExchangeFee::new(2, 4), // 0.02% maker, 0.04% taker (Intl perps public tier)
+            Exchange::Kraken => ExchangeFee::new(2, 5),  // 0.02% maker, 0.05% taker (perps $0+ tier)
+            Exchange::Hyperliquid => ExchangeFee::new(2, 5), // ~0.015% maker, 0.045% taker (rounded up)
         }
     }
 
@@ -146,8 +148,35 @@ impl FeeCalculator {
 
     /// Temporary placeholder used by `main.rs` while order execution is under development.
     pub async fn run_purchase_simulation(&mut self) {
-        while let Some(_route) = self.rx.recv().await {
-            // Fee simulation / execution wiring goes here.
+        use crate::api::execution::{submit_limit_order, LimitOrderRequest, OrderSide};
+        use crate::orderbook::book::Exchange;
+
+        while let Some(route) = self.rx.recv().await {
+            // Basic spec: place a limit buy on buy venue, limit sell on sell venue.
+            // Quantity here should be chosen by risk + available liquidity; keep it tiny for now.
+            let qty_sats: u64 = 1_000_000; // 0.01 BTC
+
+            let _buy_ack = submit_limit_order(LimitOrderRequest {
+                exchange: route.buy_exchange,
+                symbol: "BTC",
+                side: OrderSide::Buy,
+                price_cents: route.buy_price,
+                qty_sats,
+                post_only: true,
+                reduce_only: false,
+            })
+            .await;
+
+            let _sell_ack = submit_limit_order(LimitOrderRequest {
+                exchange: route.sell_exchange,
+                symbol: "BTC",
+                side: OrderSide::Sell,
+                price_cents: route.sell_price,
+                qty_sats,
+                post_only: true,
+                reduce_only: matches!(route.sell_exchange, Exchange::Hyperliquid),
+            })
+            .await;
         }
     }
 }
@@ -184,23 +213,22 @@ mod tests {
         let binance_fee = FeeCalculator::get_exchange_fee(Exchange::Binance);
         let kraken_fee = FeeCalculator::get_exchange_fee(Exchange::Kraken);
 
-        assert_eq!(binance_fee.taker_bps, 20);
-        assert_eq!(kraken_fee.taker_bps, 26);
-        assert!(kraken_fee.taker_bps > binance_fee.taker_bps);
+        assert_eq!(binance_fee.taker_bps, 5);
+        assert_eq!(kraken_fee.taker_bps, 5);
     }
 
     #[test]
     fn test_min_break_even_spread_bps_for_routes() {
-        // Binance taker (20) + Kraken taker (26) = 46 bps => 0.46%
+        // Binance taker (5) + Kraken taker (5) = 10 bps => 0.10%
         assert_eq!(
             FeeCalculator::min_break_even_spread_bps(Exchange::Binance, Exchange::Kraken),
-            46
+            10
         );
 
-        // Binance taker (20) + Hyperliquid taker (2) = 22 bps => 0.22%
+        // Binance taker (5) + Hyperliquid taker (5) = 10 bps => 0.10%
         assert_eq!(
             FeeCalculator::min_break_even_spread_bps(Exchange::Binance, Exchange::Hyperliquid),
-            22
+            10
         );
     }
 
@@ -216,8 +244,8 @@ mod tests {
 
         // Gross PnL: $10 * 0.50% = $0.05
         assert_eq!(estimate.gross_pnl_cents, 5);
-        // Fees: $10 * 0.46% = $0.046 => 4 cents (integer truncation)
-        assert_eq!(estimate.fees_cents, 4);
-        assert_eq!(estimate.net_pnl_cents, 1);
+        // Fees: $10 * 0.10% = $0.01 => 1 cent (integer truncation)
+        assert_eq!(estimate.fees_cents, 1);
+        assert_eq!(estimate.net_pnl_cents, 4);
     }
 }

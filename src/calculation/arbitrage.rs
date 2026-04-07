@@ -158,10 +158,9 @@ impl ArbitrageDetector {
         if !self.is_profitable(net_profit, gross_profit_total, best_ask_price) {
             return None;
         }
+        println!("Gross profit before fees: {} cents", gross_profit_total);
 
         println!("Net profit after fees: {} cents", net_profit);
-
-        println!("Gross profit per unit: {} cents", gross_profit);
 
         Some(ArbitrageOpportunity::new(
             best_ask_exchange,
@@ -230,6 +229,10 @@ impl ArbitrageDetector {
             return None;
         }
 
+        println!("Gross profit before fees: {} cents", gross_profit_total);
+
+        println!("Net profit after fees: {} cents", net_profit);
+
         Some(ArbitrageOpportunity::new(
             our_exchange,
             best_bid_exchange,
@@ -256,6 +259,8 @@ impl ArbitrageDetector {
                 return false;
             }
         }
+
+        println!("Gross profit: {:?}", gross_profit);
 
         true
     }
