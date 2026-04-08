@@ -146,38 +146,9 @@ impl FeeCalculator {
         }
     }
 
-    /// Temporary placeholder used by `main.rs` while order execution is under development.
+    /// Temporary placeholder: execution is handled by `PurchaseManager`.
     pub async fn run_purchase_simulation(&mut self) {
-        use crate::api::execution::{submit_limit_order, LimitOrderRequest, OrderSide};
-        use crate::orderbook::book::Exchange;
-
-        while let Some(route) = self.rx.recv().await {
-            // Basic spec: place a limit buy on buy venue, limit sell on sell venue.
-            // Quantity here should be chosen by risk + available liquidity; keep it tiny for now.
-            let qty_sats: u64 = 1_000_000; // 0.01 BTC
-
-            let _buy_ack = submit_limit_order(LimitOrderRequest {
-                exchange: route.buy_exchange,
-                symbol: "BTC",
-                side: OrderSide::Buy,
-                price_cents: route.buy_price,
-                qty_sats,
-                post_only: true,
-                reduce_only: false,
-            })
-            .await;
-
-            let _sell_ack = submit_limit_order(LimitOrderRequest {
-                exchange: route.sell_exchange,
-                symbol: "BTC",
-                side: OrderSide::Sell,
-                price_cents: route.sell_price,
-                qty_sats,
-                post_only: true,
-                reduce_only: matches!(route.sell_exchange, Exchange::Hyperliquid),
-            })
-            .await;
-        }
+        while let Some(_route) = self.rx.recv().await {}
     }
 }
 
