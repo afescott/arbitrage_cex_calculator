@@ -2,6 +2,7 @@ use crate::{
     api::execution::{submit_limit_order, ExecutorContext, LimitOrderRequest, OrderSide},
     args::Args,
     calculation::BuyExchangeSellExchange,
+    orderbook::book::Exchange,
 };
 
 pub struct PurchaseManager {
@@ -33,35 +34,48 @@ impl PurchaseManager {
             // Keep size tiny by default (0.01 BTC). Later: size from budget + book liquidity.
             let qty_sats: u64 = 1_000_000;
 
-            // LONG leg (limit, post-only)
-            let _ = submit_limit_order(
-                &self.order,
-                LimitOrderRequest {
-                    exchange: route.buy_exchange,
-                    symbol: "BTC",
-                    side: OrderSide::Buy,
-                    price_cents: route.buy_price,
-                    qty_sats,
-                    post_only: true,
-                    reduce_only: false,
-                },
-            )
-            .await;
+            println!(
+                "Buying on {:?} at {} cents, selling on {:?} at {:?} cents",
+                route.buy_exchange, route.buy_price, route.sell_exchange, route.sell_price
+            );
 
-            // SHORT leg (perps: SELL is the short entry)
-            let _ = submit_limit_order(
-                &self.order,
-                LimitOrderRequest {
-                    exchange: route.sell_exchange,
-                    symbol: "BTC",
-                    side: OrderSide::Sell,
-                    price_cents: route.sell_price,
-                    qty_sats,
-                    post_only: true,
-                    reduce_only: false,
-                },
-            )
-            .await;
+            if route.buy_exchange == Exchange::Kraken || route.sell_exchange == Exchange::Kraken {
+                println!("Kraken is not supported right now for the limit orders");
+            } else {
+                // LONG leg (limit, post-only)
+                let res_buy = submit_limit_order(
+                    &self.order,
+                    LimitOrderRequest {
+                        exchange: route.buy_exchange,
+                        symbol: "BTC",
+                        side: OrderSide::Buy,
+                        price_cents: route.buy_price,
+                        qty_sats,
+                        post_only: true,
+                        reduce_only: false,
+                    },
+                )
+                .await;
+
+                // SHORT leg (perps: SELL is the short entry)
+                let res_short = submit_limit_order(
+                    &self.order,
+                    LimitOrderRequest {
+                        exchange: route.sell_exchange,
+                        symbol: "BTC",
+                        side: OrderSide::Sell,
+                        price_cents: route.sell_price,
+                        qty_sats,
+                        post_only: true,
+                        reduce_only: false,
+                    },
+                )
+                .await;
+
+                println!("Buy order result: {:?}", res_buy);
+                println!();
+                println!("Short order result: {:?}", res_short);
+            }
         }
     }
 }
