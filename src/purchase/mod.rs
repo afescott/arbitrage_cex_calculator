@@ -34,10 +34,10 @@ impl PurchaseManager {
             // Keep size tiny by default (0.01 BTC). Later: size from budget + book liquidity.
             let qty_sats: u64 = 1_000_000;
 
-            println!(
+            /* println!(
                 "Buying on {:?} at {} cents, selling on {:?} at {:?} cents",
                 route.buy_exchange, route.buy_price, route.sell_exchange, route.sell_price
-            );
+            ); */
 
             if route.buy_exchange == Exchange::Kraken || route.sell_exchange == Exchange::Kraken {
                 println!("Kraken is not supported right now for the limit orders");
