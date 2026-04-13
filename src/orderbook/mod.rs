@@ -120,6 +120,23 @@ pub fn spawn_exchange_price_aggregator(
                     )
                     .await;
                 }
+                ExchangePrice::Dydx {
+                    price,
+                    quantity,
+                    exchange_timestamp: _,
+                    received_at: _,
+                    side,
+                } => {
+                    apply_exchange_price_update(
+                        &orderbook,
+                        book::Exchange::Dydx,
+                        price,
+                        quantity,
+                        side,
+                        &tx,
+                    )
+                    .await;
+                }
             }
         }
     })

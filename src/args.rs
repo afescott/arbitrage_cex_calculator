@@ -32,16 +32,33 @@ pub struct ExecutionTuning {
 pub struct Args {
     pub pair: Option<String>,
 
+    /// Base asset for perp legs (e.g. `BTC`, `SOL`). Defaults from `--pair` prefix or `BTC`.
+    pub perp_symbol: String,
+
+    /// Target USD notional **per leg** (long and short use the same size). If unset, defaults to
+    /// `budget/2` and is capped by `max_margin_leverage_assumption`.
+    pub notional_usd_per_leg: Option<u64>,
+
+    /// Upper bound: `notional_per_leg <= (budget/2) * max_margin_leverage_assumption` (integer USD).
+    pub max_margin_leverage_assumption: u64,
+
     // Hyperliquid
     pub hyperliquid_private_key: Option<String>,
 
+    #[cfg(feature = "cex")]
     // Kraken
     pub kraken_api_key: Option<String>,
+    #[cfg(feature = "cex")]
     pub kraken_api_secret: Option<String>,
 
+    #[cfg(feature = "cex")]
     // Binance
     pub binance_api_key: Option<String>,
+    #[cfg(feature = "cex")]
     pub binance_api_secret: Option<String>,
+
+    // dYdX v4 (order execution / signing; market data uses public indexer WS)
+    pub dydx_private_key: Option<String>,
 
     pub bias: Bias,
 
@@ -54,12 +71,13 @@ impl Args {
     /// Supported flags (all optional):
     /// - `--pair <SYMBOL>` (example: `BTC/USDT`)
     /// - `--hyperliquid-private-key <KEY>`
-    /// - `--kraken-api-key <KEY>`
-    /// - `--kraken-api-secret <SECRET>`
-    /// - `--binance-api-key <KEY>`
-    /// - `--binance-api-secret <SECRET>`
+    /// - With feature `cex`: `--kraken-api-key`, `--kraken-api-secret`, `--binance-api-key`, `--binance-api-secret`
+    /// - `--dydx-private-key <KEY>` (stub executor; for Hyperliquid–dYdX legs)
     /// - `--bias <buy|sell>`
     /// - `--budget <USD>` (integer dollars, e.g. `10`)
+    /// - `--perp-symbol <SYM>` (e.g. `SOL`; defaults from `--pair` before `/` or `BTC`)
+    /// - `--notional-usd-per-leg <USD>` (integer; default: `budget/2`, capped by leverage field below)
+    /// - `--max-margin-leverage <N>` (integer ≥ 1, default `3`) caps default/explicit notional per leg
     ///
     /// Unknown flags are ignored to keep this lightweight.
     pub fn from_env() -> Result<Self, String> {
@@ -98,16 +116,62 @@ impl Args {
             None => 10,
         };
 
-        Ok(Self {
-            pair: map.get("--pair").cloned(),
+        let pair = map.get("--pair").cloned();
+
+        let perp_symbol = map
+            .get("--perp-symbol")
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                pair.as_ref()
+                    .and_then(|p| p.split('/').next())
+                    .map(|s| s.trim().to_uppercase())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "BTC".to_string());
+
+        let notional_usd_per_leg = match map.get("--notional-usd-per-leg") {
+            Some(v) => Some(
+                v.parse::<u64>()
+                    .map_err(|_| format!("Invalid value for `--notional-usd-per-leg`: `{v}`"))?,
+            ),
+            None => None,
+        };
+
+        let max_margin_leverage_assumption = match map.get("--max-margin-leverage") {
+            Some(v) => v
+                .parse::<u64>()
+                .map_err(|_| format!("Invalid value for `--max-margin-leverage`: `{v}`"))?
+                .max(1),
+            None => 3,
+        };
+
+               Ok(Self {
+            pair,
+            perp_symbol,
+            notional_usd_per_leg,
+            max_margin_leverage_assumption,
             hyperliquid_private_key: map.get("--hyperliquid-private-key").cloned(),
+            #[cfg(feature = "cex")]
             kraken_api_key: map.get("--kraken-api-key").cloned(),
+            #[cfg(feature = "cex")]
             kraken_api_secret: map.get("--kraken-api-secret").cloned(),
+            #[cfg(feature = "cex")]
             binance_api_key: map.get("--binance-api-key").cloned(),
+            #[cfg(feature = "cex")]
             binance_api_secret: map.get("--binance-api-secret").cloned(),
+            dydx_private_key: map.get("--dydx-private-key").cloned(),
             bias,
             budget,
         })
+    }
+
+    /// Conservative USD notional for **each** leg of a cross-venue hedge, from `budget` split across two venues.
+    pub fn clamped_notional_usd_per_leg(&self) -> u64 {
+        let per_venue = (self.budget / 2).max(1);
+        let cap = per_venue.saturating_mul(self.max_margin_leverage_assumption.max(1));
+        let requested = self.notional_usd_per_leg.unwrap_or(per_venue);
+        requested.min(cap).max(1)
     }
 
     /// Derive execution tuning defaults from `budget` (USD).

@@ -4,8 +4,11 @@
 //! the project offline-safe until real REST/WS trading calls are wired in.
 
 use crate::{args::Args, orderbook::book::Exchange};
+#[cfg(feature = "cex")]
 use hmac::{Hmac, Mac};
+#[cfg(feature = "cex")]
 use sha2::Sha256;
+#[cfg(feature = "cex")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy)]
@@ -14,13 +17,15 @@ pub enum OrderSide {
     Sell,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct LimitOrderRequest {
     pub exchange: Exchange,
-    pub symbol: &'static str, // e.g. "BTC"
+    /// Base asset (e.g. `BTC`, `SOL`); Binance futures mapping appends `USDT` when missing.
+    pub symbol: String,
     pub side: OrderSide,
     pub price_cents: u64,
-    pub qty_sats: u64, // BTC smallest units (1e8)
+    /// Base quantity × 1e8 (used for BTC-style sizing and Binance `quantity` decimals).
+    pub qty_sats: u64,
     pub post_only: bool,
     pub reduce_only: bool, // perps: hedge leg can set true if desired
 }
@@ -109,6 +114,7 @@ impl OrderExecutor for HyperliquidExecutor {
     }
 }
 
+#[cfg(feature = "cex")]
 #[derive(Debug, Clone)]
 pub struct BinanceFuturesExecutor {
     api_key: String,
@@ -117,6 +123,7 @@ pub struct BinanceFuturesExecutor {
     base_url: &'static str,
 }
 
+#[cfg(feature = "cex")]
 impl BinanceFuturesExecutor {
     pub fn new(api_key: String, api_secret: String) -> Self {
         let http = reqwest::Client::builder()
@@ -133,6 +140,7 @@ impl BinanceFuturesExecutor {
     }
 }
 
+#[cfg(feature = "cex")]
 impl OrderExecutor for BinanceFuturesExecutor {
     fn venue(&self) -> Exchange {
         Exchange::Binance
@@ -140,9 +148,11 @@ impl OrderExecutor for BinanceFuturesExecutor {
 
     fn build_payload(&self, req: &LimitOrderRequest) -> Result<BuiltPayload, ExecError> {
         // Binance Futures expects: symbol (e.g. BTCUSDT), side, type, timeInForce, price, quantity, timestamp.
-        let symbol = match req.symbol {
-            "BTC" => "BTCUSDT",
-            other => other,
+        let sym = req.symbol.to_uppercase();
+        let symbol = if sym.ends_with("USDT") {
+            sym
+        } else {
+            format!("{sym}USDT")
         };
         let side = match req.side {
             OrderSide::Buy => "BUY",
@@ -221,11 +231,63 @@ impl OrderExecutor for BinanceFuturesExecutor {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct DydxExecutor {
+    private_key: String,
+}
+
+impl DydxExecutor {
+    pub fn new(private_key: String) -> Self {
+        Self { private_key }
+    }
+}
+
+impl OrderExecutor for DydxExecutor {
+    fn venue(&self) -> Exchange {
+        Exchange::Dydx
+    }
+
+    fn build_payload(&self, req: &LimitOrderRequest) -> Result<BuiltPayload, ExecError> {
+        let market = if req.symbol.contains('-') {
+            req.symbol.clone()
+        } else {
+            format!("{}-USD", req.symbol)
+        };
+        Ok(BuiltPayload {
+            venue: Exchange::Dydx,
+            endpoint: "/orders",
+            body: format!(
+                "{{\"type\":\"limit\",\"market\":\"{}\",\"side\":\"{:?}\",\"px_cents\":{},\"qty_sats\":{},\"post_only\":{},\"reduce_only\":{}}}",
+                market, req.side, req.price_cents, req.qty_sats, req.post_only, req.reduce_only
+            ),
+        })
+    }
+
+    fn sign(&self, built: BuiltPayload) -> Result<SignedPayload, ExecError> {
+        Ok(SignedPayload {
+            venue: built.venue,
+            endpoint: built.endpoint,
+            body: built.body,
+            signature: format!("dydx_sig_stub_len{}", self.private_key.len()),
+        })
+    }
+
+    async fn send(&self, signed: SignedPayload) -> Result<OrderAck, ExecError> {
+        let _ = signed;
+        Ok(OrderAck {
+            exchange: Exchange::Dydx,
+            client_order_id: "dydx-order-stub".to_string(),
+        })
+    }
+}
+
 /// Execution context holding pre-built venue executors.
 #[derive(Debug, Clone)]
 pub struct ExecutorContext {
     hyperliquid: Option<HyperliquidExecutor>,
+    #[cfg(feature = "cex")]
     binance: Option<BinanceFuturesExecutor>,
+    dydx: Option<DydxExecutor>,
 }
 
 impl ExecutorContext {
@@ -234,6 +296,7 @@ impl ExecutorContext {
             .hyperliquid_private_key
             .clone()
             .map(HyperliquidExecutor::new);
+        #[cfg(feature = "cex")]
         let binance = match (
             args.binance_api_key.clone(),
             args.binance_api_secret.clone(),
@@ -241,9 +304,12 @@ impl ExecutorContext {
             (Some(k), Some(s)) => Some(BinanceFuturesExecutor::new(k, s)),
             _ => None,
         };
+        let dydx = args.dydx_private_key.clone().map(DydxExecutor::new);
         Self {
             hyperliquid,
+            #[cfg(feature = "cex")]
             binance,
+            dydx,
         }
     }
 
@@ -251,8 +317,18 @@ impl ExecutorContext {
         self.hyperliquid.is_some()
     }
 
+    #[cfg(feature = "cex")]
     pub fn has_binance(&self) -> bool {
         self.binance.is_some()
+    }
+
+    #[cfg(not(feature = "cex"))]
+    pub fn has_binance(&self) -> bool {
+        false
+    }
+
+    pub fn has_dydx(&self) -> bool {
+        self.dydx.is_some()
     }
 }
 
@@ -270,10 +346,22 @@ pub async fn submit_limit_order(
             let signed = ex.sign(built)?;
             ex.send(signed).await
         }
+        #[cfg(feature = "cex")]
         Exchange::Binance => {
             let ex = order.binance.as_ref().ok_or(ExecError::MissingCredentials(
                 "--binance-api-key/--binance-api-secret",
             ))?;
+            let built = ex.build_payload(&req)?;
+            let signed = ex.sign(built)?;
+            ex.send(signed).await
+        }
+        #[cfg(not(feature = "cex"))]
+        Exchange::Binance => Err(ExecError::UnsupportedExchange(Exchange::Binance)),
+        Exchange::Dydx => {
+            let ex = order
+                .dydx
+                .as_ref()
+                .ok_or(ExecError::MissingCredentials("--dydx-private-key"))?;
             let built = ex.build_payload(&req)?;
             let signed = ex.sign(built)?;
             ex.send(signed).await

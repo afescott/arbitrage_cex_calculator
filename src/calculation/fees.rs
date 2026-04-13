@@ -56,6 +56,7 @@ impl FeeCalculator {
             Exchange::Coinbase => ExchangeFee::new(2, 4), // 0.02% maker, 0.04% taker (Intl perps public tier)
             Exchange::Kraken => ExchangeFee::new(2, 5),  // 0.02% maker, 0.05% taker (perps $0+ tier)
             Exchange::Hyperliquid => ExchangeFee::new(2, 5), // ~0.015% maker, 0.045% taker (rounded up)
+            Exchange::Dydx => ExchangeFee::new(2, 5), // v4 public tier–style; verify against current schedule
         }
     }
 

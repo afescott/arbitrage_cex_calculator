@@ -3,6 +3,11 @@ name = "security_flamegraph_lowlatency"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+## Centralized exchange WebSocket feeds (Binance, Kraken) + Binance futures execution signing.
+cex = ["dep:reqwest", "dep:hmac", "dep:sha2", "dep:hex"]
+
 [dependencies]
 crossbeam-channel = "0.5"
 crossbeam-deque = "0.8"
@@ -13,11 +18,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Execution (REST signing/sending)
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"] }
-hmac = "0.12"
-sha2 = "0.10"
-hex = "0.4"
+# Binance futures execution only (feature `cex`)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2"], optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+hex = { version = "0.4", optional = true }
 # Order book dependencies
 crossbeam-queue = "0.3"
 dashmap = "5.5"

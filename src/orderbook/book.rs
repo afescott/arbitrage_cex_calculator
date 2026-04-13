@@ -37,6 +37,7 @@ pub enum Exchange {
     Coinbase,
     Kraken,
     Hyperliquid,
+    Dydx,
 }
 
 /// Represents the best price level with both price and quantity.

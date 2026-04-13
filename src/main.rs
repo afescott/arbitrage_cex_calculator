@@ -3,9 +3,12 @@ mod args;
 mod calculation;
 mod orderbook;
 mod purchase;
+mod sizing;
 mod util;
 
-use api::{BinanceClient, CoinbaseClient, ExchangePrice, HyperliquidClient, KrakenClient};
+#[cfg(feature = "cex")]
+use api::{BinanceClient, KrakenClient};
+use api::{CoinbaseClient, DydxClient, ExchangePrice, HyperliquidClient};
 use tracing::Level;
 use tracing_subscriber;
 
@@ -40,15 +43,27 @@ async fn run(order_book_name: String, args: Args) {
     let (tx, rx) = tokio::sync::mpsc::channel::<ExchangePrice>(1000);
 
     // Spawn tasks for each exchange
-    let binance_tx = tx.clone();
-    let binance_handle = tokio::spawn(async move {
-        BinanceClient::new(binance_tx).listen_btc_usdt().await;
-    });
+    #[cfg(feature = "cex")]
+    let binance_handle = {
+        let binance_tx = tx.clone();
+        tokio::spawn(async move {
+            BinanceClient::new(binance_tx).listen_btc_usdt().await;
+        })
+    };
+    #[cfg(not(feature = "cex"))]
+    let binance_handle =
+        tokio::spawn(async { std::future::pending::<()>().await });
 
-    let kraken_tx = tx.clone();
-    let kraken_handle = tokio::spawn(async move {
-        KrakenClient::new(kraken_tx).listen_btc_usdt().await;
-    });
+    #[cfg(feature = "cex")]
+    let kraken_handle = {
+        let kraken_tx = tx.clone();
+        tokio::spawn(async move {
+            KrakenClient::new(kraken_tx).listen_btc_usdt().await;
+        })
+    };
+    #[cfg(not(feature = "cex"))]
+    let kraken_handle =
+        tokio::spawn(async { std::future::pending::<()>().await });
 
     let coinbase_tx = tx.clone();
     let coinbase_handle = tokio::spawn(async move {
@@ -60,6 +75,11 @@ async fn run(order_book_name: String, args: Args) {
         HyperliquidClient::new(hyperliquid_tx)
             .listen_btc_usdt()
             .await;
+    });
+
+    let dydx_tx = tx.clone();
+    let dydx_handle = tokio::spawn(async move {
+        DydxClient::new(dydx_tx).listen_btc_usdt().await;
     });
 
     let (tx_purchase, rx_purchase) = tokio::sync::mpsc::channel(50);
@@ -87,6 +107,9 @@ async fn run(order_book_name: String, args: Args) {
         }
         _ = hyperliquid_handle => {
             // info!("Hyperliquid task ended");
+        }
+        _ = dydx_handle => {
+            // info!("dYdX task ended");
         }
         _ = aggregator_handle => {
             // info!("Aggregator task ended");
