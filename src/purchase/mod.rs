@@ -62,10 +62,9 @@ impl PurchaseManager {
                 continue;
             }
 
-            let Some(qty_sats) = sizing::qty_base_e8_from_notional(
-                route.buy_price,
-                self.notional_usd_per_leg,
-            ) else {
+            let Some(qty_sats) =
+                sizing::qty_base_e8_from_notional(route.buy_price, self.notional_usd_per_leg)
+            else {
                 eprintln!(
                     "Skipping route: could not size qty (buy_price_cents={}, notional={})",
                     route.buy_price, self.notional_usd_per_leg
@@ -73,14 +72,13 @@ impl PurchaseManager {
                 continue;
             };
 
-            /* println!(
+            println!(
                 "Buying on {:?} at {} cents, selling on {:?} at {:?} cents",
                 route.buy_exchange, route.buy_price, route.sell_exchange, route.sell_price
-            ); */
+            );
 
             #[cfg(feature = "cex")]
-            let skip_kraken_route = route.buy_exchange
-                == crate::orderbook::book::Exchange::Kraken
+            let skip_kraken_route = route.buy_exchange == crate::orderbook::book::Exchange::Kraken
                 || route.sell_exchange == crate::orderbook::book::Exchange::Kraken;
             #[cfg(not(feature = "cex"))]
             let skip_kraken_route = false;

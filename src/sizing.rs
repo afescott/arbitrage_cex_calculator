@@ -5,8 +5,9 @@
 
 /// Approximate minimum **USD notional** many perp books enforce (order may still reject if stricter).
 pub fn conservative_min_notional_usd(_perp_symbol: &str) -> u64 {
-    // Hyperliquid / many venues: small alts can be ~$5–$10; BTC/ETH often higher. Stay conservative.
-    5
+    // Hyperliquid may reject below ~$10 notional per their API examples; we only gate tiny junk sizes.
+    // For $1 budget testing, this stays at 1; expect venue-level rejects until size is raised.
+    1
 }
 
 /// `price_cents`: quote (e.g. USD) cents per 1 base unit (matches orderbook route prices).

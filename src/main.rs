@@ -51,8 +51,7 @@ async fn run(order_book_name: String, args: Args) {
         })
     };
     #[cfg(not(feature = "cex"))]
-    let binance_handle =
-        tokio::spawn(async { std::future::pending::<()>().await });
+    let binance_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     #[cfg(feature = "cex")]
     let kraken_handle = {
@@ -62,8 +61,7 @@ async fn run(order_book_name: String, args: Args) {
         })
     };
     #[cfg(not(feature = "cex"))]
-    let kraken_handle =
-        tokio::spawn(async { std::future::pending::<()>().await });
+    let kraken_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     let coinbase_tx = tx.clone();
     let coinbase_handle = tokio::spawn(async move {
@@ -96,7 +94,7 @@ async fn run(order_book_name: String, args: Args) {
 
     // Wait for all tasks (they run indefinitely)
     tokio::select! {
-        _ = binance_handle => {
+        /* _ = binance_handle => {
             // info!("Binance task ended");
         }
         _ = kraken_handle => {
@@ -104,7 +102,7 @@ async fn run(order_book_name: String, args: Args) {
         }
         _ = coinbase_handle => {
             // info!("Coinbase task ended");
-        }
+        } */
         _ = hyperliquid_handle => {
             // info!("Hyperliquid task ended");
         }
@@ -113,6 +111,9 @@ async fn run(order_book_name: String, args: Args) {
         }
         _ = aggregator_handle => {
             // info!("Aggregator task ended");
+        }
+        _ = purchase_handle => {
+            // info!("Purchase manager task ended");
         }
     }
 }

@@ -44,6 +44,9 @@ pub struct Args {
 
     // Hyperliquid
     pub hyperliquid_private_key: Option<String>,
+    /// Perpetual `universe` index from [`meta`](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint).
+    /// If unset and `perp_symbol` is `BTC`, defaults to `0` (verify on mainnet).
+    pub hyperliquid_asset_id: Option<u32>,
 
     #[cfg(feature = "cex")]
     // Kraken
@@ -74,7 +77,8 @@ impl Args {
     /// - With feature `cex`: `--kraken-api-key`, `--kraken-api-secret`, `--binance-api-key`, `--binance-api-secret`
     /// - `--dydx-private-key <KEY>` (stub executor; for Hyperliquid–dYdX legs)
     /// - `--bias <buy|sell>`
-    /// - `--budget <USD>` (integer dollars, e.g. `10`)
+    /// - `--budget <USD>` (integer dollars; default `1` for small test runs)
+    /// - `--hyperliquid-asset-id <N>` (perp index in `meta.universe`; optional for `BTC` default guess `0`)
     /// - `--perp-symbol <SYM>` (e.g. `SOL`; defaults from `--pair` before `/` or `BTC`)
     /// - `--notional-usd-per-leg <USD>` (integer; default: `budget/2`, capped by leverage field below)
     /// - `--max-margin-leverage <N>` (integer ≥ 1, default `3`) caps default/explicit notional per leg
@@ -113,7 +117,7 @@ impl Args {
             Some(v) => v
                 .parse::<u64>()
                 .map_err(|_| format!("Invalid value for `--budget`: `{v}`"))?,
-            None => 10,
+            None => 1,
         };
 
         let pair = map.get("--pair").cloned();
@@ -146,12 +150,21 @@ impl Args {
             None => 3,
         };
 
-               Ok(Self {
+        let hyperliquid_asset_id = match map.get("--hyperliquid-asset-id") {
+            Some(v) => Some(
+                v.parse::<u32>()
+                    .map_err(|_| format!("Invalid value for `--hyperliquid-asset-id`: `{v}`"))?,
+            ),
+            None => None,
+        };
+
+        Ok(Self {
             pair,
             perp_symbol,
             notional_usd_per_leg,
             max_margin_leverage_assumption,
             hyperliquid_private_key: map.get("--hyperliquid-private-key").cloned(),
+            hyperliquid_asset_id,
             #[cfg(feature = "cex")]
             kraken_api_key: map.get("--kraken-api-key").cloned(),
             #[cfg(feature = "cex")]
