@@ -62,6 +62,8 @@ pub struct Args {
 
     // dYdX v4 (order execution / signing; market data uses public indexer WS)
     pub dydx_private_key: Option<String>,
+    /// If set, `DydxExecutor::send` POSTs the planning JSON here (signing service / composite client).
+    pub dydx_order_relay_url: Option<String>,
 
     pub bias: Bias,
 
@@ -75,7 +77,8 @@ impl Args {
     /// - `--pair <SYMBOL>` (example: `BTC/USDT`)
     /// - `--hyperliquid-private-key <KEY>`
     /// - With feature `cex`: `--kraken-api-key`, `--kraken-api-secret`, `--binance-api-key`, `--binance-api-secret`
-    /// - `--dydx-private-key <KEY>` (stub executor; for Hyperliquid–dYdX legs)
+    /// - `--dydx-private-key <KEY>`
+    /// - `--dydx-order-relay-url <URL>` (POST planning JSON for dYdX; on-chain needs protobuf `tx_bytes`)
     /// - `--bias <buy|sell>`
     /// - `--budget <USD>` (integer dollars; default `1` for small test runs)
     /// - `--hyperliquid-asset-id <N>` (perp index in `meta.universe`; optional for `BTC` default guess `0`)
@@ -174,6 +177,7 @@ impl Args {
             #[cfg(feature = "cex")]
             binance_api_secret: map.get("--binance-api-secret").cloned(),
             dydx_private_key: map.get("--dydx-private-key").cloned(),
+            dydx_order_relay_url: map.get("--dydx-order-relay-url").cloned(),
             bias,
             budget,
         })

@@ -1,19 +1,18 @@
 //! Order execution scaffolding: build payload → sign → send.
 //!
-//! This module focuses on API *shape* and call flow. `send()` is stubbed to keep
-//! the project offline-safe until real REST/WS trading calls are wired in.
-//!
 //! ## Hyperliquid
-//! `POST https://api.hyperliquid.xyz/exchange` — body is JSON with `action`, `nonce`, `signature`
+//! `POST https://api.hyperliquid.xyz/exchange` — JSON with `action`, `nonce`, `signature`
 //! per [Exchange endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint).
-//! Many markets enforce a **~$10 minimum order notional**; smaller sizes are for schema testing only.
+//! `send()` performs the HTTP POST. **Signing is still a stub** until EIP-712 / L1 action signing is wired;
+//! the API typically rejects invalid signatures. Perp entry: **Buy → long**, **Sell → short** (`action.orders[0].b`).
 //!
 //! ## dYdX v4
-//! Orders are **protobuf `MsgPlaceOrder`** transactions broadcast to the chain (not a single REST JSON).
-//! `DydxExecutor::build_payload` emits a **planning JSON** shaped like the protocol fields; wire the real
-//! client from [integration trade](https://docs.dydx.xyz/interaction/integration/integration-trade).
+//! On-chain orders are **protobuf `MsgPlaceOrder`** + Cosmos broadcast (`/cosmos/tx/v1beta1/txs`), not raw JSON.
+//! `send()` POSTs the planning JSON to **`--dydx-order-relay-url`** when set (your signing/broadcast service).
+//! See [integration trade](https://docs.dydx.xyz/interaction/integration/integration-trade).
 
 use crate::{args::Args, orderbook::book::Exchange};
+use reqwest::header::CONTENT_TYPE;
 #[cfg(feature = "cex")]
 use hmac::{Hmac, Mac};
 #[cfg(feature = "cex")]
@@ -22,6 +21,8 @@ use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 use std::time::{SystemTime as StdSystemTime, UNIX_EPOCH as StdUNIX_EPOCH};
+
+const HYPERLIQUID_EXCHANGE_URL: &str = "https://api.hyperliquid.xyz/exchange";
 
 #[derive(Debug, Clone, Copy)]
 pub enum OrderSide {
@@ -86,14 +87,21 @@ pub struct HyperliquidExecutor {
     /// `meta.universe` index; if `None` and `perp_symbol == "BTC"`, [`resolve_asset_index`] uses `0`.
     asset_index: Option<u32>,
     perp_symbol: String,
+    http: reqwest::Client,
 }
 
 impl HyperliquidExecutor {
     pub fn new(private_key: String, asset_index: Option<u32>, perp_symbol: String) -> Self {
+        let http = reqwest::Client::builder()
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("reqwest hyperliquid client");
         Self {
             private_key,
             asset_index,
             perp_symbol,
+            http,
         }
     }
 
@@ -145,6 +153,69 @@ fn hl_price_decimal_from_cents(price_cents: u64) -> String {
         format!("{}.{:01}", dollars, cents / 10)
     } else {
         format!("{}.{:02}", dollars, cents)
+    }
+}
+
+/// Hyperliquid perp: `b: true` → buy / long, `b: false` → sell / short.
+fn hl_position_side_label(body: &str) -> Option<&'static str> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let b = v.pointer("/action/orders/0/b")?.as_bool()?;
+    Some(if b { "long" } else { "short" })
+}
+
+fn parse_hyperliquid_order_response(text: &str) -> Result<OrderAck, ExecError> {
+    let v: Value = serde_json::from_str(text).map_err(|e| {
+        ExecError::SendFailed(format!(
+            "hyperliquid: bad JSON ({e}), body: {}",
+            text.chars().take(500).collect::<String>()
+        ))
+    })?;
+    if v.get("status").and_then(|s| s.as_str()) != Some("ok") {
+        return Err(ExecError::SendFailed(format!(
+            "hyperliquid: {}",
+            text.chars().take(1000).collect::<String>()
+        )));
+    }
+    let statuses = v
+        .pointer("/response/data/statuses")
+        .and_then(|x| x.as_array())
+        .ok_or_else(|| {
+            ExecError::SendFailed(format!(
+                "hyperliquid: missing response.data.statuses: {}",
+                text.chars().take(500).collect::<String>()
+            ))
+        })?;
+    let first = statuses.first().ok_or_else(|| {
+        ExecError::SendFailed("hyperliquid: empty response.data.statuses".into())
+    })?;
+    if let Some(err) = first.get("error").and_then(|e| e.as_str()) {
+        return Err(ExecError::SendFailed(format!("hyperliquid: {err}")));
+    }
+    let oid = first
+        .get("resting")
+        .and_then(|r| r.get("oid"))
+        .or_else(|| first.get("filled").and_then(|f| f.get("oid")));
+    let client_order_id = if let Some(oidv) = oid {
+        oidv.as_u64()
+            .map(|u| u.to_string())
+            .or_else(|| oidv.as_i64().map(|i| i.to_string()))
+            .or_else(|| oidv.as_str().map(std::string::ToString::to_string))
+            .unwrap_or_else(|| "hyperliquid-ok".to_string())
+    } else {
+        "hyperliquid-ok".to_string()
+    };
+    Ok(OrderAck {
+        exchange: Exchange::Hyperliquid,
+        client_order_id,
+    })
+}
+
+fn dydx_position_side_label(body: &str) -> Option<&'static str> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    match v.pointer("/order/side")?.as_str()? {
+        "SIDE_BUY" => Some("long"),
+        "SIDE_SELL" => Some("short"),
+        _ => None,
     }
 }
 
@@ -203,11 +274,34 @@ impl OrderExecutor for HyperliquidExecutor {
     }
 
     async fn send(&self, signed: SignedPayload) -> Result<OrderAck, ExecError> {
-        let _ = signed;
-        Ok(OrderAck {
-            exchange: Exchange::Hyperliquid,
-            client_order_id: "hyperliquid-order-stub".to_string(),
-        })
+        let side = hl_position_side_label(&signed.body).unwrap_or("unknown");
+        tracing::info!(
+            target: "execution",
+            exchange = "hyperliquid",
+            side,
+            "POST {}",
+            HYPERLIQUID_EXCHANGE_URL
+        );
+        let resp = self
+            .http
+            .post(HYPERLIQUID_EXCHANGE_URL)
+            .header(CONTENT_TYPE, "application/json")
+            .body(signed.body)
+            .send()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid http: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid body: {e}")))?;
+        if !status.is_success() {
+            return Err(ExecError::SendFailed(format!(
+                "hyperliquid HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            )));
+        }
+        parse_hyperliquid_order_response(&text)
     }
 }
 
@@ -331,11 +425,23 @@ impl OrderExecutor for BinanceFuturesExecutor {
 #[derive(Debug, Clone)]
 pub struct DydxExecutor {
     private_key: String,
+    /// POST target for planning JSON (signing service). On-chain flow uses `tx_bytes` broadcast instead.
+    order_relay_url: Option<String>,
+    http: reqwest::Client,
 }
 
 impl DydxExecutor {
-    pub fn new(private_key: String) -> Self {
-        Self { private_key }
+    pub fn new(private_key: String, order_relay_url: Option<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("reqwest dydx client");
+        Self {
+            private_key,
+            order_relay_url,
+            http,
+        }
     }
 }
 
@@ -399,10 +505,63 @@ impl OrderExecutor for DydxExecutor {
     }
 
     async fn send(&self, signed: SignedPayload) -> Result<OrderAck, ExecError> {
-        let _ = signed;
+        let relay = self.order_relay_url.as_deref().ok_or_else(|| {
+            ExecError::SendFailed(
+                "dYdX: set --dydx-order-relay-url to POST planning JSON, or implement Cosmos tx_bytes broadcast in send()"
+                    .into(),
+            )
+        })?;
+        let side = dydx_position_side_label(&signed.body).unwrap_or("unknown");
+        tracing::info!(
+            target: "execution",
+            exchange = "dydx",
+            side,
+            url = relay,
+            "POST order relay"
+        );
+        let resp = self
+            .http
+            .post(relay)
+            .header(CONTENT_TYPE, "application/json")
+            .body(signed.body)
+            .send()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("dydx relay http: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("dydx relay body: {e}")))?;
+        if !status.is_success() {
+            return Err(ExecError::SendFailed(format!(
+                "dydx relay HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            )));
+        }
+        let client_order_id = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.get("client_order_id")
+                    .or(v.get("clientOrderId"))
+                    .or(v.get("txhash"))
+                    .or(v.get("txHash"))
+                    .and_then(|x| {
+                        x.as_str()
+                            .map(std::string::ToString::to_string)
+                            .or_else(|| x.as_u64().map(|u| u.to_string()))
+                    })
+            })
+            .unwrap_or_else(|| {
+                if text.len() > 120 {
+                    format!("dydx-relay:{}", text.chars().take(120).collect::<String>())
+                } else {
+                    text.clone()
+                }
+            });
+        let _ = self.private_key.len();
         Ok(OrderAck {
             exchange: Exchange::Dydx,
-            client_order_id: "dydx-order-stub".to_string(),
+            client_order_id,
         })
     }
 }
@@ -433,7 +592,10 @@ impl ExecutorContext {
             (Some(k), Some(s)) => Some(BinanceFuturesExecutor::new(k, s)),
             _ => None,
         };
-        let dydx = args.dydx_private_key.clone().map(DydxExecutor::new);
+        let dydx = args
+            .dydx_private_key
+            .clone()
+            .map(|pk| DydxExecutor::new(pk, args.dydx_order_relay_url.clone()));
         Self {
             hyperliquid,
             #[cfg(feature = "cex")]
