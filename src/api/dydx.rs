@@ -88,7 +88,12 @@ impl DydxClient {
         let exchange_timestamp = value
             .get("message_id")
             .and_then(|m| m.as_u64())
-            .or_else(|| value.get("message_id").and_then(|m| m.as_i64()).map(|i| i as u64));
+            .or_else(|| {
+                value
+                    .get("message_id")
+                    .and_then(|m| m.as_i64())
+                    .map(|i| i as u64)
+            });
 
         let contents = match value.get("contents") {
             Some(c) => c,

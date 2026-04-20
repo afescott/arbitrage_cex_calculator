@@ -1,4 +1,7 @@
-use crate::{api::{ExchangePrice, Side}, util::parse_price_cents};
+use crate::{
+    api::{ExchangePrice, Side},
+    util::parse_price_cents,
+};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -100,77 +103,97 @@ impl HyperliquidClient {
         // Handle l2Book data
         // Format: {"channel":"l2Book","data":{"levels":[[bids],[asks]],"time":timestamp_ms,"coin":"BTC"}}
         // Where bids/asks are arrays of objects: {"px": "45000.50", "sz": "1.5", "n": 3}
-        let data_obj = value.get("data")
+        let data_obj = value
+            .get("data")
             .and_then(|d| d.as_object())
             .or_else(|| value.as_object());
-        
+
         if let Some(data) = data_obj {
-            if let Some(coin) = data.get("coin").or_else(|| value.get("coin")).and_then(|c| c.as_str()) {
+            if let Some(coin) = data
+                .get("coin")
+                .or_else(|| value.get("coin"))
+                .and_then(|c| c.as_str())
+            {
                 if coin == "BTC" {
-                    let exchange_timestamp = data.get("time").or_else(|| value.get("time")).and_then(|t| t.as_u64());
+                    let exchange_timestamp = data
+                        .get("time")
+                        .or_else(|| value.get("time"))
+                        .and_then(|t| t.as_u64());
 
                     // Process levels array: [bids_array, asks_array]
-                    if let Some(levels) = data.get("levels").or_else(|| value.get("levels")).and_then(|l| l.as_array()) {
-                    if levels.len() >= 2 {
-                        // Process bids (first element) - buy side
-                        if let Some(bids) = levels[0].as_array() {
-                            for bid_obj in bids {
-                                if let Some(bid) = bid_obj.as_object() {
-                                    if let (Some(px_str), Some(sz_str)) = (
-                                        bid.get("px").and_then(|p| p.as_str()),
-                                        bid.get("sz").and_then(|s| s.as_str()),
-                                    ) {
-                                        let price_opt = parse_price_cents(px_str);
-                                        let quantity_opt =
-                                            crate::util::parse_quantity_smallest_unit(sz_str, 8);
+                    if let Some(levels) = data
+                        .get("levels")
+                        .or_else(|| value.get("levels"))
+                        .and_then(|l| l.as_array())
+                    {
+                        if levels.len() >= 2 {
+                            // Process bids (first element) - buy side
+                            if let Some(bids) = levels[0].as_array() {
+                                for bid_obj in bids {
+                                    if let Some(bid) = bid_obj.as_object() {
+                                        if let (Some(px_str), Some(sz_str)) = (
+                                            bid.get("px").and_then(|p| p.as_str()),
+                                            bid.get("sz").and_then(|s| s.as_str()),
+                                        ) {
+                                            let price_opt = parse_price_cents(px_str);
+                                            let quantity_opt =
+                                                crate::util::parse_quantity_smallest_unit(
+                                                    sz_str, 8,
+                                                );
 
-                                        if let (Some(price), Some(quantity)) = (price_opt, quantity_opt) {
-                                            self.tx
-                                                .send(ExchangePrice::Hyperliquid {
-                                                    price,
-                                                    quantity,
-                                                    exchange_timestamp,
-                                                    received_at,
-                                                    side: Side::Buy, // Bids are Buy side
-                                                })
-                                                .await
-                                                .ok();
+                                            if let (Some(price), Some(quantity)) =
+                                                (price_opt, quantity_opt)
+                                            {
+                                                self.tx
+                                                    .send(ExchangePrice::Hyperliquid {
+                                                        price,
+                                                        quantity,
+                                                        exchange_timestamp,
+                                                        received_at,
+                                                        side: Side::Buy, // Bids are Buy side
+                                                    })
+                                                    .await
+                                                    .ok();
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // Process asks (second element) - sell side
-                        if let Some(asks) = levels[1].as_array() {
-                            for ask_obj in asks {
-                                if let Some(ask) = ask_obj.as_object() {
-                                    if let (Some(px_str), Some(sz_str)) = (
-                                        ask.get("px").and_then(|p| p.as_str()),
-                                        ask.get("sz").and_then(|s| s.as_str()),
-                                    ) {
-                                        let price_opt = parse_price_cents(px_str);
-                                        let quantity_opt =
-                                            crate::util::parse_quantity_smallest_unit(sz_str, 8);
+                            // Process asks (second element) - sell side
+                            if let Some(asks) = levels[1].as_array() {
+                                for ask_obj in asks {
+                                    if let Some(ask) = ask_obj.as_object() {
+                                        if let (Some(px_str), Some(sz_str)) = (
+                                            ask.get("px").and_then(|p| p.as_str()),
+                                            ask.get("sz").and_then(|s| s.as_str()),
+                                        ) {
+                                            let price_opt = parse_price_cents(px_str);
+                                            let quantity_opt =
+                                                crate::util::parse_quantity_smallest_unit(
+                                                    sz_str, 8,
+                                                );
 
-                                        if let (Some(price), Some(quantity)) = (price_opt, quantity_opt) {
-                                            self.tx
-                                                .send(ExchangePrice::Hyperliquid {
-                                                    price,
-                                                    quantity,
-                                                    exchange_timestamp,
-                                                    received_at,
-                                                    side: Side::Sell, // Asks are Sell side
-                                                })
-                                                .await
-                                                .ok();
+                                            if let (Some(price), Some(quantity)) =
+                                                (price_opt, quantity_opt)
+                                            {
+                                                self.tx
+                                                    .send(ExchangePrice::Hyperliquid {
+                                                        price,
+                                                        quantity,
+                                                        exchange_timestamp,
+                                                        received_at,
+                                                        side: Side::Sell, // Asks are Sell side
+                                                    })
+                                                    .await
+                                                    .ok();
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                }
                 }
             }
         }

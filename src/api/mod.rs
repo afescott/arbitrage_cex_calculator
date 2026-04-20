@@ -5,7 +5,6 @@
 pub mod binance;
 pub mod coinbase;
 pub mod dydx;
-pub mod execution;
 pub mod hyperliquid;
 #[cfg(feature = "cex")]
 pub mod kraken;
@@ -209,7 +208,11 @@ impl std::fmt::Display for ExchangePrice {
                         price, ts, latency_us
                     )
                 } else {
-                    write!(f, "Hyperliquid: {} cents (latency: {}μs)", price, latency_us)
+                    write!(
+                        f,
+                        "Hyperliquid: {} cents (latency: {}μs)",
+                        price, latency_us
+                    )
                 }
             }
             ExchangePrice::Dydx { price, .. } => {

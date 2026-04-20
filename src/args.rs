@@ -68,6 +68,9 @@ pub struct Args {
     pub bias: Bias,
 
     pub budget: u64,
+
+    /// 0 = no live orders (dry run); 1 = submit real orders.
+    pub execute_live: bool,
 }
 
 impl Args {
@@ -81,6 +84,7 @@ impl Args {
     /// - `--dydx-order-relay-url <URL>` (POST planning JSON for dYdX; on-chain needs protobuf `tx_bytes`)
     /// - `--bias <buy|sell>`
     /// - `--budget <USD>` (integer dollars; default `1` for small test runs)
+    /// - `--execute-live <0|1>` (default `0`; when `1`, submits real orders)
     /// - `--hyperliquid-asset-id <N>` (perp index in `meta.universe`; optional for `BTC` default guess `0`)
     /// - `--perp-symbol <SYM>` (e.g. `SOL`; defaults from `--pair` before `/` or `BTC`)
     /// - `--notional-usd-per-leg <USD>` (integer; default: `budget/2`, capped by leverage field below)
@@ -121,6 +125,16 @@ impl Args {
                 .parse::<u64>()
                 .map_err(|_| format!("Invalid value for `--budget`: `{v}`"))?,
             None => 1,
+        };
+
+        let execute_live = match map
+            .get("--execute-live")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("1") | Some("true") | Some("yes") => true,
+            Some("0") | Some("false") | Some("no") | None => false,
+            Some(other) => return Err(format!("Invalid value for `--execute-live`: `{other}`")),
         };
 
         let pair = map.get("--pair").cloned();
@@ -180,6 +194,7 @@ impl Args {
             dydx_order_relay_url: map.get("--dydx-order-relay-url").cloned(),
             bias,
             budget,
+            execute_live,
         })
     }
 

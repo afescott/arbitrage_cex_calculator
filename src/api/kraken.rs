@@ -1,4 +1,7 @@
-use crate::{api::{ExchangePrice, Side}, util::parse_price_cents};
+use crate::{
+    api::{ExchangePrice, Side},
+    util::parse_price_cents,
+};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -93,9 +96,10 @@ impl KrakenClient {
         // Handle book data (array format)
         // Kraken format: [channelID, {data}, channelName, pair]
         // Book data: { "bids": [["price", "volume", "timestamp"], ...], "asks": [...] }
-        
+
         // Debug: log first book message structure
-        static FIRST_BOOK_MSG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+        static FIRST_BOOK_MSG: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(true);
         if FIRST_BOOK_MSG.swap(false, std::sync::atomic::Ordering::Relaxed) {
             if let Some(array) = value.as_array() {
                 // info!("[Kraken] First book message array length: {}", array.len());
@@ -110,91 +114,109 @@ impl KrakenClient {
                 }
             }
         }
-        
+
         if let Some(array) = value.as_array() {
             if array.len() >= 4 {
                 if let Some(book_data) = array[1].as_object() {
                     // Process bids - Kraken uses "bs" (bids snapshot) or "b" (bids update)
-                    let bids_opt = book_data.get("bs")
+                    let bids_opt = book_data
+                        .get("bs")
                         .or_else(|| book_data.get("b"))
                         .and_then(|b| b.as_array());
-                    
+
                     if let Some(bids) = bids_opt {
                         // info!("[Kraken] Processing {} bids", bids.len());
                         for bid in bids {
                             if let Some(bid_array) = bid.as_array() {
                                 if bid_array.len() >= 2 {
-                                    if let (Some(price_str), Some(volume_str)) = (
-                                        bid_array[0].as_str(),
-                                        bid_array[1].as_str(),
-                                    ) {
+                                    if let (Some(price_str), Some(volume_str)) =
+                                        (bid_array[0].as_str(), bid_array[1].as_str())
+                                    {
                                         // println!("[Kraken] Bid: price_str={}, volume_str={}", price_str, volume_str);
-                                        
+
                                         // Skip if volume is "0.00000000" (removal)
                                         if volume_str == "0.00000000" || volume_str == "0" {
                                             continue;
                                         }
-                                        
+
                                         let price_opt = parse_price_cents(price_str);
-                                        let quantity_opt = crate::util::parse_quantity_smallest_unit(volume_str, 8);
-                                        
-                                        if let (Some(price), Some(quantity)) = (price_opt, quantity_opt) {
+                                        let quantity_opt =
+                                            crate::util::parse_quantity_smallest_unit(
+                                                volume_str, 8,
+                                            );
+
+                                        if let (Some(price), Some(quantity)) =
+                                            (price_opt, quantity_opt)
+                                        {
                                             // Parse timestamp if available (3rd element)
-                                            let exchange_timestamp = bid_array.get(2)
+                                            let exchange_timestamp = bid_array
+                                                .get(2)
                                                 .and_then(|t| t.as_str())
                                                 .and_then(|s| s.parse::<u64>().ok());
-                                            
-                                            self.tx.send(ExchangePrice::Kraken {
-                                                price,
-                                                quantity,
-                                                exchange_timestamp,
-                                                received_at,
-                                                side: Side::Buy, // Bids are Buy side
-                                            }).await.ok();
+
+                                            self.tx
+                                                .send(ExchangePrice::Kraken {
+                                                    price,
+                                                    quantity,
+                                                    exchange_timestamp,
+                                                    received_at,
+                                                    side: Side::Buy, // Bids are Buy side
+                                                })
+                                                .await
+                                                .ok();
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    
+
                     // Process asks - Kraken uses "as" (asks snapshot) or "a" (asks update)
-                    let asks_opt = book_data.get("as")
+                    let asks_opt = book_data
+                        .get("as")
                         .or_else(|| book_data.get("a"))
                         .and_then(|a| a.as_array());
-                    
+
                     if let Some(asks) = asks_opt {
                         // info!("[Kraken] Processing {} asks", asks.len());
                         for ask in asks {
                             if let Some(ask_array) = ask.as_array() {
                                 if ask_array.len() >= 2 {
-                                    if let (Some(price_str), Some(volume_str)) = (
-                                        ask_array[0].as_str(),
-                                        ask_array[1].as_str(),
-                                    ) {
+                                    if let (Some(price_str), Some(volume_str)) =
+                                        (ask_array[0].as_str(), ask_array[1].as_str())
+                                    {
                                         // println!("[Kraken] Ask: price_str={}, volume_str={}", price_str, volume_str);
-                                        
+
                                         // Skip if volume is "0.00000000" (removal)
                                         if volume_str == "0.00000000" || volume_str == "0" {
                                             continue;
                                         }
-                                        
+
                                         let price_opt = parse_price_cents(price_str);
-                                        let quantity_opt = crate::util::parse_quantity_smallest_unit(volume_str, 8);
-                                        
-                                        if let (Some(price), Some(quantity)) = (price_opt, quantity_opt) {
+                                        let quantity_opt =
+                                            crate::util::parse_quantity_smallest_unit(
+                                                volume_str, 8,
+                                            );
+
+                                        if let (Some(price), Some(quantity)) =
+                                            (price_opt, quantity_opt)
+                                        {
                                             // Parse timestamp if available (3rd element)
-                                            let exchange_timestamp = ask_array.get(2)
+                                            let exchange_timestamp = ask_array
+                                                .get(2)
                                                 .and_then(|t| t.as_str())
                                                 .and_then(|s| s.parse::<u64>().ok());
-                                            
-                                            self.tx.send(ExchangePrice::Kraken {
-                                                price,
-                                                quantity,
-                                                exchange_timestamp,
-                                                received_at,
-                                                side: Side::Sell, // Asks are Sell side
-                                            }).await.ok();
+
+                                            self.tx
+                                                .send(ExchangePrice::Kraken {
+                                                    price,
+                                                    quantity,
+                                                    exchange_timestamp,
+                                                    received_at,
+                                                    side: Side::Sell, // Asks are Sell side
+                                                })
+                                                .await
+                                                .ok();
                                         }
                                     }
                                 }

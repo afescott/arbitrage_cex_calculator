@@ -1,4 +1,7 @@
-use crate::{api::{ExchangePrice, Side}, util::parse_price_cents};
+use crate::{
+    api::{ExchangePrice, Side},
+    util::parse_price_cents,
+};
 use futures_util::StreamExt;
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};

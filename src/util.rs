@@ -1,6 +1,6 @@
 /// Parse quantity string to smallest unit (e.g., satoshis for BTC)
 /// Quantities can have many decimal places, so we parse as integer with scaling
-/// 
+///
 /// Examples:
 /// - "1.5" -> 150000000 (satoshis, assuming 8 decimals)
 /// - "0.001" -> 100000 (satoshis)
@@ -11,28 +11,30 @@ pub fn parse_quantity_smallest_unit(s: &str, decimals: u32) -> Option<u64> {
         Some(dot_pos) => {
             let integer_part = s[..dot_pos].parse::<u64>().ok()?;
             let fractional_str = &s[dot_pos + 1..];
-            
+
             // Pad or truncate fractional part to match decimals
             let fractional = if fractional_str.len() <= decimals as usize {
                 // Pad with zeros
-                let padded = format!("{}{}", fractional_str, "0".repeat(decimals as usize - fractional_str.len()));
+                let padded = format!(
+                    "{}{}",
+                    fractional_str,
+                    "0".repeat(decimals as usize - fractional_str.len())
+                );
                 padded.parse::<u64>().ok()?
             } else {
                 // Truncate
                 fractional_str[..decimals as usize].parse::<u64>().ok()?
             };
-            
+
             Some(integer_part * scale + fractional)
         }
-        None => {
-            s.parse::<u64>().ok().map(|v| v * scale)
-        }
+        None => s.parse::<u64>().ok().map(|v| v * scale),
     }
 }
 
 /// Fast decimal string to cents (u64) parser for low-latency applications
 /// Avoids f64 parsing overhead and floating-point arithmetic
-/// 
+///
 /// Examples:
 /// - "95245.75" -> 9524575 (cents)
 /// - "100.00" -> 10000 (cents)
@@ -44,10 +46,10 @@ pub fn parse_price_cents(s: &str) -> Option<u64> {
         Some(dot_pos) => {
             // Parse integer part (before decimal)
             let integer_part = s[..dot_pos].parse::<u64>().ok()?;
-            
+
             // Parse fractional part (after decimal)
             let fractional_str = &s[dot_pos + 1..];
-            
+
             // Handle up to 2 decimal places (cents)
             let fractional = match fractional_str.len() {
                 0 => 0,
@@ -58,7 +60,7 @@ pub fn parse_price_cents(s: &str) -> Option<u64> {
                     fractional_str[..2].parse::<u64>().ok()?
                 }
             };
-            
+
             // Combine: integer_part * 100 + fractional
             Some(integer_part * 100 + fractional)
         }
@@ -91,7 +93,13 @@ mod tests {
         assert_eq!(parse_quantity_smallest_unit("0.001", 8), Some(100000));
         assert_eq!(parse_quantity_smallest_unit("100", 8), Some(10000000000));
         assert_eq!(parse_quantity_smallest_unit("0.00000001", 8), Some(1));
-        assert_eq!(parse_quantity_smallest_unit("0.12345678", 8), Some(12345678));
-        assert_eq!(parse_quantity_smallest_unit("0.123456789", 8), Some(12345678)); // Truncates
+        assert_eq!(
+            parse_quantity_smallest_unit("0.12345678", 8),
+            Some(12345678)
+        );
+        assert_eq!(
+            parse_quantity_smallest_unit("0.123456789", 8),
+            Some(12345678)
+        ); // Truncates
     }
 }
