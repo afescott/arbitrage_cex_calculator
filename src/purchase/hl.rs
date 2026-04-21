@@ -1,37 +1,33 @@
-//! Hyperliquid purchase: preflight, route checks, and limit-order build → sign → POST `/exchange`.
+//! Hyperliquid purchase: preflight, route checks, and real order placement via `hypersdk`.
+//!
+//! This replaces the previous stub `r/s/v` signing. `hypersdk` builds the L1 action, signs it,
+//! and submits it to `/exchange`.
 
-use reqwest::header::CONTENT_TYPE;
-use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use chrono::Utc;
+use hypersdk::hypercore::{self, types::*, PrivateKeySigner};
+use rust_decimal::Decimal;
+use serde_json::Value;
 
-use super::{
-    BuiltPayload, ExecError, LimitOrderRequest, OrderAck, OrderExecutor, OrderSide, SignedPayload,
-};
+use super::{BuiltPayload, ExecError, LimitOrderRequest, OrderAck, OrderExecutor, OrderSide, SignedPayload};
 use crate::orderbook::book::Exchange;
-
-const HYPERLIQUID_EXCHANGE_URL: &str = "https://api.hyperliquid.xyz/exchange";
 
 #[derive(Debug, Clone)]
 pub(crate) struct HyperliquidExecutor {
-    private_key: String,
+    signer: PrivateKeySigner,
     /// `meta.universe` index; if `None` and `perp_symbol == "BTC"`, [`resolve_asset_index`] uses `0`.
     asset_index: Option<u32>,
     perp_symbol: String,
-    http: reqwest::Client,
 }
 
 impl HyperliquidExecutor {
     pub(crate) fn new(private_key: String, asset_index: Option<u32>, perp_symbol: String) -> Self {
-        let http = reqwest::Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(8)
-            .build()
-            .expect("reqwest hyperliquid client");
+        let signer: PrivateKeySigner = private_key
+            .parse()
+            .expect("hyperliquid private key parse (hypersdk)");
         Self {
-            private_key,
+            signer,
             asset_index,
             perp_symbol,
-            http,
         }
     }
 
@@ -49,76 +45,12 @@ impl HyperliquidExecutor {
     }
 }
 
-fn hl_nonce_ms() -> Result<u64, ExecError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .map_err(|_| ExecError::SendFailed("clock".into()))
+fn decimal_from_price_cents(price_cents: u64) -> Result<Decimal, ExecError> {
+    Ok(Decimal::from_i128_with_scale(price_cents as i128, 2))
 }
 
-fn hl_price_decimal_from_cents(price_cents: u64) -> String {
-    let dollars = price_cents / 100;
-    let cents = price_cents % 100;
-    if cents == 0 {
-        dollars.to_string()
-    } else if cents % 10 == 0 {
-        format!("{}.{:01}", dollars, cents / 10)
-    } else {
-        format!("{}.{:02}", dollars, cents)
-    }
-}
-
-fn hl_position_side_label(body: &str) -> Option<&'static str> {
-    let v: Value = serde_json::from_str(body).ok()?;
-    let b = v.pointer("/action/orders/0/b")?.as_bool()?;
-    Some(if b { "long" } else { "short" })
-}
-
-fn parse_hyperliquid_order_response(text: &str) -> Result<OrderAck, ExecError> {
-    let v: Value = serde_json::from_str(text).map_err(|e| {
-        ExecError::SendFailed(format!(
-            "hyperliquid: bad JSON ({e}), body: {}",
-            text.chars().take(500).collect::<String>()
-        ))
-    })?;
-    if v.get("status").and_then(|s| s.as_str()) != Some("ok") {
-        return Err(ExecError::SendFailed(format!(
-            "hyperliquid: {}",
-            text.chars().take(1000).collect::<String>()
-        )));
-    }
-    let statuses = v
-        .pointer("/response/data/statuses")
-        .and_then(|x| x.as_array())
-        .ok_or_else(|| {
-            ExecError::SendFailed(format!(
-                "hyperliquid: missing response.data.statuses: {}",
-                text.chars().take(500).collect::<String>()
-            ))
-        })?;
-    let first = statuses
-        .first()
-        .ok_or_else(|| ExecError::SendFailed("hyperliquid: empty response.data.statuses".into()))?;
-    if let Some(err) = first.get("error").and_then(|e| e.as_str()) {
-        return Err(ExecError::SendFailed(format!("hyperliquid: {err}")));
-    }
-    let oid = first
-        .get("resting")
-        .and_then(|r| r.get("oid"))
-        .or_else(|| first.get("filled").and_then(|f| f.get("oid")));
-    let client_order_id = if let Some(oidv) = oid {
-        oidv.as_u64()
-            .map(|u| u.to_string())
-            .or_else(|| oidv.as_i64().map(|i| i.to_string()))
-            .or_else(|| oidv.as_str().map(std::string::ToString::to_string))
-            .unwrap_or_else(|| "hyperliquid-ok".to_string())
-    } else {
-        "hyperliquid-ok".to_string()
-    };
-    Ok(OrderAck {
-        exchange: Exchange::Hyperliquid,
-        client_order_id,
-    })
+fn decimal_from_qty_e8(qty_sats: u64) -> Result<Decimal, ExecError> {
+    Ok(Decimal::from_i128_with_scale(qty_sats as i128, 8))
 }
 
 impl OrderExecutor for HyperliquidExecutor {
@@ -127,25 +59,18 @@ impl OrderExecutor for HyperliquidExecutor {
     }
 
     fn build_payload(&self, req: &LimitOrderRequest) -> Result<BuiltPayload, ExecError> {
+        // Encode a minimal plan JSON so we keep build→sign→send shape.
         let asset = self.resolve_asset_index()?;
         let is_buy = matches!(req.side, OrderSide::Buy);
-        let tif = if req.post_only { "Alo" } else { "Gtc" };
-        let action = json!({
-            "type": "order",
-            "orders": [{
-                "a": asset,
-                "b": is_buy,
-                "p": hl_price_decimal_from_cents(req.price_cents),
-                "s": super::qty_sats_to_decimal_string(req.qty_sats),
-                "r": req.reduce_only,
-                "t": { "limit": { "tif": tif } }
-            }],
-            "grouping": "na"
-        });
-        let nonce = hl_nonce_ms()?;
-        let root = json!({
-            "action": action,
-            "nonce": nonce
+        let limit_px = decimal_from_price_cents(req.price_cents)?;
+        let sz = decimal_from_qty_e8(req.qty_sats)?;
+        let root = serde_json::json!({
+            "asset": asset,
+            "is_buy": is_buy,
+            "limit_px": limit_px.to_string(),
+            "sz": sz.to_string(),
+            "reduce_only": req.reduce_only,
+            "post_only": req.post_only
         });
         let body = serde_json::to_string(&root)
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid json: {e}")))?;
@@ -157,52 +82,73 @@ impl OrderExecutor for HyperliquidExecutor {
     }
 
     fn sign(&self, built: BuiltPayload) -> Result<SignedPayload, ExecError> {
-        let mut root: Value = serde_json::from_str(&built.body)
-            .map_err(|e| ExecError::SendFailed(format!("hyperliquid parse: {e}")))?;
-        root["signature"] = json!({
-            "r": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "s": "0x0000000000000000000000000000000000000000000000000000000000000000",
-            "v": 27
-        });
-        let body = serde_json::to_string(&root)
-            .map_err(|e| ExecError::SendFailed(format!("hyperliquid json: {e}")))?;
+        // Signing happens inside `send()` via hypersdk.
         Ok(SignedPayload {
             venue: built.venue,
             endpoint: built.endpoint,
-            body,
-            signature: format!("hyperliquid-stub-ecdsa:pk_len={}", self.private_key.len()),
+            body: built.body,
+            signature: "hypersdk:sign-in-send".to_string(),
         })
     }
 
     async fn send(&self, signed: SignedPayload) -> Result<OrderAck, ExecError> {
-        let side = hl_position_side_label(&signed.body).unwrap_or("unknown");
-        tracing::info!(
-            target: "execution",
-            exchange = "hyperliquid",
-            side,
-            "POST {}",
-            HYPERLIQUID_EXCHANGE_URL
-        );
-        let resp = self
-            .http
-            .post(HYPERLIQUID_EXCHANGE_URL)
-            .header(CONTENT_TYPE, "application/json")
-            .body(signed.body)
-            .send()
+        let v: Value = serde_json::from_str(&signed.body)
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid payload parse: {e}")))?;
+
+        let asset = v
+            .get("asset")
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing asset".into()))? as u32;
+        let is_buy = v
+            .get("is_buy")
+            .and_then(|x| x.as_bool())
+            .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing is_buy".into()))?;
+        let limit_px: Decimal = v
+            .get("limit_px")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing limit_px".into()))?
+            .parse()
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid: bad limit_px: {e}")))?;
+        let sz: Decimal = v
+            .get("sz")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing sz".into()))?
+            .parse()
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid: bad sz: {e}")))?;
+        let reduce_only = v.get("reduce_only").and_then(|x| x.as_bool()).unwrap_or(false);
+        let post_only = v.get("post_only").and_then(|x| x.as_bool()).unwrap_or(true);
+
+        let client = hypercore::mainnet();
+        let batch = BatchOrder {
+            orders: vec![OrderRequest {
+                asset: asset
+                    .try_into()
+                    .map_err(|_| ExecError::SendFailed("hyperliquid: asset id too large".into()))?,
+                is_buy,
+                limit_px,
+                sz,
+                reduce_only,
+                order_type: OrderTypePlacement::Limit {
+                    tif: if post_only { TimeInForce::Alo } else { TimeInForce::Gtc },
+                },
+                cloid: Default::default(),
+            }],
+            grouping: OrderGrouping::Na,
+        };
+
+        let nonce = Utc::now().timestamp_millis() as u64;
+        let statuses = client
+            .place(&self.signer, batch, nonce, None, None)
             .await
-            .map_err(|e| ExecError::SendFailed(format!("hyperliquid http: {e}")))?;
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| ExecError::SendFailed(format!("hyperliquid body: {e}")))?;
-        if !status.is_success() {
-            return Err(ExecError::SendFailed(format!(
-                "hyperliquid HTTP {status}: {}",
-                text.chars().take(800).collect::<String>()
-            )));
-        }
-        parse_hyperliquid_order_response(&text)
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid place: {e}")))?;
+
+        Ok(OrderAck {
+            exchange: Exchange::Hyperliquid,
+            client_order_id: statuses
+                .first()
+                .map(|s| format!("{s:?}"))
+                .unwrap_or_else(|| "hyperliquid:ok".to_string()),
+        })
     }
 }
 

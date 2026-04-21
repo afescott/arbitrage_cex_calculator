@@ -52,8 +52,10 @@ impl OrderExecutor for DydxExecutor {
         };
         let is_buy = matches!(req.side, OrderSide::Buy);
         let root = json!({
-            "_comment": "Not a live HTTP body: sign and broadcast protobuf MsgPlaceOrder via dYdX v4 node/composite client.",
+            "_comment": "Relay: POST this JSON to --dydx-order-relay-url; `order.quantums` is human base size (same decimal string as Hyperliquid qty), not chain quantums.",
             "msg_type": "dydxprotocol.clob.MsgPlaceOrder",
+            "post_only": req.post_only,
+            "reduce_only": req.reduce_only,
             "order": {
                 "order_id": {
                     "subaccount_id": {

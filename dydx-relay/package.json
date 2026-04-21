@@ -1,0 +1,13 @@
+{
+  "name": "dydx-order-relay",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.cjs"
+  },
+  "dependencies": {
+    "@dydxprotocol/v4-client-js": "3.6.0"
+  }
+}

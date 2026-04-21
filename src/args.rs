@@ -81,7 +81,7 @@ impl Args {
     /// - `--hyperliquid-private-key <KEY>`
     /// - With feature `cex`: `--kraken-api-key`, `--kraken-api-secret`, `--binance-api-key`, `--binance-api-secret`
     /// - `--dydx-private-key <KEY>`
-    /// - `--dydx-order-relay-url <URL>` (POST planning JSON for dYdX; on-chain needs protobuf `tx_bytes`)
+    /// - `--dydx-order-relay-url <URL>` (POST planning JSON; run local relay from `dydx-relay/server.cjs`)
     /// - `--bias <buy|sell>`
     /// - `--budget <USD>` (integer dollars; default `1` for small test runs)
     /// - `--execute-live <0|1>` (default `0`; when `1`, submits real orders)
