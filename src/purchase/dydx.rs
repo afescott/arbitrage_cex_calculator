@@ -10,13 +10,13 @@ use crate::orderbook::book::Exchange;
 
 #[derive(Debug, Clone)]
 pub(crate) struct DydxExecutor {
-    private_key: String,
+    private_key: Option<String>,
     order_relay_url: Option<String>,
     http: reqwest::Client,
 }
 
 impl DydxExecutor {
-    pub(crate) fn new(private_key: String, order_relay_url: Option<String>) -> Self {
+    pub(crate) fn new(private_key: Option<String>, order_relay_url: Option<String>) -> Self {
         let http = reqwest::Client::builder()
             .tcp_nodelay(true)
             .pool_max_idle_per_host(8)
@@ -95,7 +95,10 @@ impl OrderExecutor for DydxExecutor {
             venue: built.venue,
             endpoint: built.endpoint,
             body: built.body,
-            signature: format!("dydx-stub-cosmos:pk_len={}", self.private_key.len()),
+            signature: format!(
+                "dydx-relay:local_pk_len={}",
+                self.private_key.as_deref().map(|s| s.len()).unwrap_or(0)
+            ),
         })
     }
 
@@ -153,7 +156,6 @@ impl OrderExecutor for DydxExecutor {
                     text.clone()
                 }
             });
-        let _ = self.private_key.len();
         Ok(OrderAck {
             exchange: Exchange::Dydx,
             client_order_id,
@@ -181,7 +183,7 @@ impl DydxPurchase {
             if ctx.has_dydx() {
                 Ok(())
             } else {
-                Err("Missing `--dydx-private-key` (and use `--dydx-order-relay-url` for live dYdX POST); build with `--features cex` for Binance/Kraken")
+                Err("Missing dYdX config: set `--dydx-order-relay-url http://127.0.0.1:8787/` (relay) or `--dydx-private-key` (local signing); build with `--features cex` for Binance/Kraken")
             }
         }
     }

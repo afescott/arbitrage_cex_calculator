@@ -38,6 +38,10 @@ const {
 
 const BECH32_PREFIX = 'dydx';
 
+function sideLabel(side) {
+  return side === OrderSide.BUY ? 'BUY' : 'SELL';
+}
+
 async function loadWallet() {
   const pk = process.env.DYDX_PRIVATE_KEY?.trim();
   const mnemonic = process.env.DYDX_MNEMONIC?.trim();
@@ -146,6 +150,10 @@ async function main() {
       const plan = parsePlanningJson(chunks);
       const clientId = randomInt(1, 0xffffffff);
 
+      console.error(
+        `[relay] rx order clientId=${clientId} ticker=${plan.ticker} side=${sideLabel(plan.side)} price=${plan.price} size=${plan.size} postOnly=${plan.postOnly} reduceOnly=${plan.reduceOnly}`,
+      );
+
       let tx;
       if (plan.postOnly) {
         tx = await client.placeOrder(
@@ -179,6 +187,7 @@ async function main() {
         );
       }
       const txHash = txHashFromResult(tx);
+      console.error(`[relay] ok clientId=${clientId} txHash=${txHash}`);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -189,6 +198,7 @@ async function main() {
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[relay] err ${msg}`);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: msg }));
     }

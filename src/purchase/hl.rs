@@ -13,7 +13,8 @@ use crate::orderbook::book::Exchange;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HyperliquidExecutor {
-    signer: PrivateKeySigner,
+    signer: Option<PrivateKeySigner>,
+    signer_err: Option<String>,
     /// `meta.universe` index; if `None` and `perp_symbol == "BTC"`, [`resolve_asset_index`] uses `0`.
     asset_index: Option<u32>,
     perp_symbol: String,
@@ -21,14 +22,31 @@ pub(crate) struct HyperliquidExecutor {
 
 impl HyperliquidExecutor {
     pub(crate) fn new(private_key: String, asset_index: Option<u32>, perp_symbol: String) -> Self {
-        let signer: PrivateKeySigner = private_key
-            .parse()
-            .expect("hyperliquid private key parse (hypersdk)");
+        // Strict: hypersdk expects a 32-byte hex private key (64 hex chars), no `0x` prefix.
+        let normalized = private_key.trim();
+        let (signer, signer_err) = match normalized.parse::<PrivateKeySigner>() {
+            Ok(s) => (Some(s), None),
+            Err(e) => (
+                None,
+                Some(format!(
+                    "Invalid `--hyperliquid-private-key`: expected 64 hex chars (32 bytes), no `0x` prefix. hypersdk error: {e}"
+                )),
+            ),
+        };
         Self {
             signer,
+            signer_err,
             asset_index,
             perp_symbol,
         }
+    }
+
+    fn signer(&self) -> Result<&PrivateKeySigner, ExecError> {
+        self.signer.as_ref().ok_or_else(|| {
+            ExecError::MissingCredentials(
+                "Invalid `--hyperliquid-private-key` (must be 32-byte hex, e.g. 0x… with 64 hex chars)",
+            )
+        })
     }
 
     fn resolve_asset_index(&self) -> Result<u32, ExecError> {
@@ -92,6 +110,10 @@ impl OrderExecutor for HyperliquidExecutor {
     }
 
     async fn send(&self, signed: SignedPayload) -> Result<OrderAck, ExecError> {
+        if let Some(msg) = self.signer_err.as_deref() {
+            // ExecError::MissingCredentials carries a `'static` message; use SendFailed for owned strings.
+            return Err(ExecError::SendFailed(msg.to_string()));
+        }
         let v: Value = serde_json::from_str(&signed.body)
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid payload parse: {e}")))?;
 
@@ -119,6 +141,7 @@ impl OrderExecutor for HyperliquidExecutor {
         let post_only = v.get("post_only").and_then(|x| x.as_bool()).unwrap_or(true);
 
         let client = hypercore::mainnet();
+        let signer = self.signer()?;
         let batch = BatchOrder {
             orders: vec![OrderRequest {
                 asset: asset
@@ -138,7 +161,7 @@ impl OrderExecutor for HyperliquidExecutor {
 
         let nonce = Utc::now().timestamp_millis() as u64;
         let statuses = client
-            .place(&self.signer, batch, nonce, None, None)
+            .place(signer, batch, nonce, None, None)
             .await
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid place: {e}")))?;
 

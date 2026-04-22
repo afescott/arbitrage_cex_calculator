@@ -106,10 +106,13 @@ impl ExecutorContext {
             (Some(k), Some(s)) => Some(binance::BinanceFuturesExecutor::new(k, s)),
             _ => None,
         };
-        let dydx = args
-            .dydx_private_key
-            .clone()
-            .map(|pk| dydx::DydxExecutor::new(pk, args.dydx_order_relay_url.clone()));
+        // For relay-based execution, the Rust binary does NOT need the signing material.
+        // We still create a Dydx executor if either a local key OR a relay URL is provided.
+        let dydx = match (args.dydx_private_key.clone(), args.dydx_order_relay_url.clone()) {
+            (Some(pk), relay) => Some(dydx::DydxExecutor::new(Some(pk), relay)),
+            (None, Some(relay)) => Some(dydx::DydxExecutor::new(None, Some(relay))),
+            (None, None) => None,
+        };
         Self {
             hyperliquid,
             #[cfg(feature = "cex")]
