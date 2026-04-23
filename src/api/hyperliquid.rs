@@ -6,21 +6,28 @@ use futures_util::{SinkExt, StreamExt};
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-const HYPERLIQUID_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
+fn hyperliquid_ws_url(network: &str) -> &'static str {
+    match network {
+        "testnet" => "wss://api.hyperliquid-testnet.xyz/ws",
+        _ => "wss://api.hyperliquid.xyz/ws",
+    }
+}
 
 pub struct HyperliquidClient {
     tx: tokio::sync::mpsc::Sender<ExchangePrice>,
+    network: String,
 }
 
 impl HyperliquidClient {
-    pub fn new(tx: tokio::sync::mpsc::Sender<ExchangePrice>) -> Self {
-        HyperliquidClient { tx }
+    pub fn new(tx: tokio::sync::mpsc::Sender<ExchangePrice>, network: String) -> Self {
+        HyperliquidClient { tx, network }
     }
 
     pub async fn listen_btc_usdt(&self) {
         // info!("[Hyperliquid] Connecting to BTC perpetual futures price feed...");
 
-        match connect_async(HYPERLIQUID_WS_URL).await {
+        let url = hyperliquid_ws_url(&self.network);
+        match connect_async(url).await {
             Ok((mut ws_stream, _)) => {
                 // info!("[Hyperliquid] Connected successfully");
 

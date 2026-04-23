@@ -11,6 +11,8 @@ use serde_json::Value;
 use super::{BuiltPayload, ExecError, LimitOrderRequest, OrderAck, OrderExecutor, OrderSide, SignedPayload};
 use crate::orderbook::book::Exchange;
 
+const HL_MIN_ORDER_NOTIONAL_USD: u64 = 10;
+
 #[derive(Debug, Clone)]
 pub(crate) struct HyperliquidExecutor {
     signer: Option<PrivateKeySigner>,
@@ -18,10 +20,16 @@ pub(crate) struct HyperliquidExecutor {
     /// `meta.universe` index; if `None` and `perp_symbol == "BTC"`, [`resolve_asset_index`] uses `0`.
     asset_index: Option<u32>,
     perp_symbol: String,
+    network: String,
 }
 
 impl HyperliquidExecutor {
-    pub(crate) fn new(private_key: String, asset_index: Option<u32>, perp_symbol: String) -> Self {
+    pub(crate) fn new(
+        private_key: String,
+        asset_index: Option<u32>,
+        perp_symbol: String,
+        network: String,
+    ) -> Self {
         // Strict: hypersdk expects a 32-byte hex private key (64 hex chars), no `0x` prefix.
         let normalized = private_key.trim();
         let (signer, signer_err) = match normalized.parse::<PrivateKeySigner>() {
@@ -38,6 +46,7 @@ impl HyperliquidExecutor {
             signer_err,
             asset_index,
             perp_symbol,
+            network,
         }
     }
 
@@ -61,6 +70,14 @@ impl HyperliquidExecutor {
             self.perp_symbol
         )))
     }
+
+    fn qty_step_decimals(&self) -> Option<u32> {
+        if self.perp_symbol == "BTC" {
+            Some(5) // from `info/meta`: BTC szDecimals=5
+        } else {
+            None
+        }
+    }
 }
 
 fn decimal_from_price_cents(price_cents: u64) -> Result<Decimal, ExecError> {
@@ -69,6 +86,29 @@ fn decimal_from_price_cents(price_cents: u64) -> Result<Decimal, ExecError> {
 
 fn decimal_from_qty_e8(qty_sats: u64) -> Result<Decimal, ExecError> {
     Ok(Decimal::from_i128_with_scale(qty_sats as i128, 8))
+}
+
+fn truncate_decimal_to_scale(d: Decimal, scale: u32) -> Decimal {
+    // rust_decimal has built-in rescale, but it rounds; we want floor/truncate for safety.
+    if d.scale() <= scale {
+        return d;
+    }
+    // Multiply, truncate, divide.
+    let factor = Decimal::from_i128_with_scale(10i128.pow(scale), 0);
+    let scaled = (d * factor).trunc();
+    // Avoid rescale surprises: create with target scale by dividing.
+    (scaled / factor).rescale(scale);
+    scaled / factor
+}
+
+fn ceil_decimal_to_scale(d: Decimal, scale: u32) -> Decimal {
+    if d.scale() <= scale {
+        return d;
+    }
+    let factor = Decimal::from_i128_with_scale(10i128.pow(scale), 0);
+    let mut v = (d * factor).ceil() / factor;
+    v.rescale(scale);
+    v
 }
 
 impl OrderExecutor for HyperliquidExecutor {
@@ -81,7 +121,34 @@ impl OrderExecutor for HyperliquidExecutor {
         let asset = self.resolve_asset_index()?;
         let is_buy = matches!(req.side, OrderSide::Buy);
         let limit_px = decimal_from_price_cents(req.price_cents)?;
-        let sz = decimal_from_qty_e8(req.qty_sats)?;
+        let mut sz = decimal_from_qty_e8(req.qty_sats)?;
+        if let Some(decimals) = self.qty_step_decimals() {
+            sz = truncate_decimal_to_scale(sz, decimals);
+        }
+        if sz <= Decimal::ZERO {
+            return Err(ExecError::SendFailed("hyperliquid: size rounded to 0".into()));
+        }
+
+        // Hyperliquid rejects orders below ~$10 notional. Because we truncate size to the venue
+        // step, a "target $10" order can become $9.99... and get rejected; bump size to the
+        // smallest step that clears the minimum.
+        let min_notional = Decimal::from(HL_MIN_ORDER_NOTIONAL_USD);
+        let notional = limit_px * sz;
+        if notional < min_notional {
+            if limit_px <= Decimal::ZERO {
+                return Err(ExecError::SendFailed("hyperliquid: limit_px must be > 0".into()));
+            }
+            let required_sz = min_notional / limit_px;
+            sz = if let Some(decimals) = self.qty_step_decimals() {
+                ceil_decimal_to_scale(required_sz, decimals)
+            } else {
+                required_sz
+            };
+            if sz <= Decimal::ZERO {
+                return Err(ExecError::SendFailed("hyperliquid: bumped size rounded to 0".into()));
+            }
+        }
+
         let root = serde_json::json!({
             "asset": asset,
             "is_buy": is_buy,
@@ -140,7 +207,10 @@ impl OrderExecutor for HyperliquidExecutor {
         let reduce_only = v.get("reduce_only").and_then(|x| x.as_bool()).unwrap_or(false);
         let post_only = v.get("post_only").and_then(|x| x.as_bool()).unwrap_or(true);
 
-        let client = hypercore::mainnet();
+        let client = match self.network.as_str() {
+            "testnet" => hypercore::testnet(),
+            _ => hypercore::mainnet(),
+        };
         let signer = self.signer()?;
         let batch = BatchOrder {
             orders: vec![OrderRequest {
@@ -152,7 +222,7 @@ impl OrderExecutor for HyperliquidExecutor {
                 sz,
                 reduce_only,
                 order_type: OrderTypePlacement::Limit {
-                    tif: if post_only { TimeInForce::Alo } else { TimeInForce::Gtc },
+                    tif: if post_only { TimeInForce::Alo } else { TimeInForce::Ioc },
                 },
                 cloid: Default::default(),
             }],
@@ -165,6 +235,11 @@ impl OrderExecutor for HyperliquidExecutor {
             .await
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid place: {e}")))?;
 
+        if let Some(first) = statuses.first() {
+            if !first.is_ok() {
+                return Err(ExecError::SendFailed(format!("hyperliquid: {first:?}")));
+            }
+        }
         Ok(OrderAck {
             exchange: Exchange::Hyperliquid,
             client_order_id: statuses

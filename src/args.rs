@@ -47,6 +47,9 @@ pub struct Args {
     /// Perpetual `universe` index from [`meta`](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint).
     /// If unset and `perp_symbol` is `BTC`, defaults to `0` (verify on mainnet).
     pub hyperliquid_asset_id: Option<u32>,
+    /// Hyperliquid network selection for both market data and execution.
+    /// If unset: defaults to `testnet` when `--execute-live 0`, otherwise `mainnet`.
+    pub hyperliquid_network: String,
 
     #[cfg(feature = "cex")]
     // Kraken
@@ -86,6 +89,7 @@ impl Args {
     /// - `--budget <USD>` (integer dollars; default `1` for small test runs)
     /// - `--execute-live <0|1>` (default `0`; when `1`, submits real orders)
     /// - `--hyperliquid-asset-id <N>` (perp index in `meta.universe`; optional for `BTC` default guess `0`)
+    /// - `--hyperliquid-network <mainnet|testnet>` (optional; default depends on `--execute-live`)
     /// - `--perp-symbol <SYM>` (e.g. `SOL`; defaults from `--pair` before `/` or `BTC`)
     /// - `--notional-usd-per-leg <USD>` (integer; default: `budget/2`, capped by leverage field below)
     /// - `--max-margin-leverage <N>` (integer ≥ 1, default `3`) caps default/explicit notional per leg
@@ -175,6 +179,23 @@ impl Args {
             None => None,
         };
 
+        let hyperliquid_network = map
+            .get("--hyperliquid-network")
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if execute_live {
+                    "mainnet".to_string()
+                } else {
+                    "testnet".to_string()
+                }
+            });
+        if hyperliquid_network != "mainnet" && hyperliquid_network != "testnet" {
+            return Err(format!(
+                "Invalid value for `--hyperliquid-network`: `{hyperliquid_network}` (expected mainnet|testnet)"
+            ));
+        }
+
         Ok(Self {
             pair,
             perp_symbol,
@@ -182,6 +203,7 @@ impl Args {
             max_margin_leverage_assumption,
             hyperliquid_private_key: map.get("--hyperliquid-private-key").cloned(),
             hyperliquid_asset_id,
+            hyperliquid_network,
             #[cfg(feature = "cex")]
             kraken_api_key: map.get("--kraken-api-key").cloned(),
             #[cfg(feature = "cex")]

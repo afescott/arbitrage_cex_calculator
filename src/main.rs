@@ -69,8 +69,9 @@ async fn run(order_book_name: String, args: Args) {
     });
 
     let hyperliquid_tx = tx.clone();
+    let hyperliquid_network = args.hyperliquid_network.clone();
     let hyperliquid_handle = tokio::spawn(async move {
-        HyperliquidClient::new(hyperliquid_tx)
+        HyperliquidClient::new(hyperliquid_tx, hyperliquid_network)
             .listen_btc_usdt()
             .await;
     });

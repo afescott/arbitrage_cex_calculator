@@ -96,7 +96,12 @@ pub struct ExecutorContext {
 impl ExecutorContext {
     pub fn new(args: &Args) -> Self {
         let hyperliquid = args.hyperliquid_private_key.clone().map(|pk| {
-            hl::HyperliquidExecutor::new(pk, args.hyperliquid_asset_id, args.perp_symbol.clone())
+            hl::HyperliquidExecutor::new(
+                pk,
+                args.hyperliquid_asset_id,
+                args.perp_symbol.clone(),
+                args.hyperliquid_network.clone(),
+            )
         });
         #[cfg(feature = "cex")]
         let binance = match (
@@ -284,36 +289,35 @@ impl PurchaseManager {
 
     async fn submit_cross_legs(&self, route: &BuyExchangeSellExchange, qty_sats: u64) {
         let sym = self.perp_symbol.clone();
-        let res_buy = submit_limit_order(
-            &self.order,
-            LimitOrderRequest {
-                exchange: route.buy_exchange,
-                symbol: sym.clone(),
-                side: OrderSide::Buy,
-                price_cents: route.buy_price,
-                qty_sats,
-                post_only: true,
-                reduce_only: false,
-            },
-        )
-        .await;
+        // IOC-style limit orders: submit the first leg; only attempt the second if the first
+        // submission succeeded. (This does NOT guarantee fills; it guarantees we don't fire the
+        // second leg when the first leg is rejected at submit-time.)
+        let first = LimitOrderRequest {
+            exchange: route.buy_exchange,
+            symbol: sym.clone(),
+            side: OrderSide::Buy,
+            price_cents: route.buy_price,
+            qty_sats,
+            post_only: false,
+            reduce_only: false,
+        };
+        let res_first = submit_limit_order(&self.order, first).await;
+        println!("First leg submit result: {:?}", res_first);
+        if res_first.is_err() {
+            println!("Skipping second leg: first leg failed at submit-time.");
+            return;
+        }
 
-        let res_short = submit_limit_order(
-            &self.order,
-            LimitOrderRequest {
-                exchange: route.sell_exchange,
-                symbol: sym,
-                side: OrderSide::Sell,
-                price_cents: route.sell_price,
-                qty_sats,
-                post_only: true,
-                reduce_only: false,
-            },
-        )
-        .await;
-
-        println!("Buy order result: {:?}", res_buy);
-        println!();
-        println!("Short order result: {:?}", res_short);
+        let second = LimitOrderRequest {
+            exchange: route.sell_exchange,
+            symbol: sym,
+            side: OrderSide::Sell,
+            price_cents: route.sell_price,
+            qty_sats,
+            post_only: false,
+            reduce_only: false,
+        };
+        let res_second = submit_limit_order(&self.order, second).await;
+        println!("Second leg submit result: {:?}", res_second);
     }
 }
