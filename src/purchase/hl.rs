@@ -9,6 +9,7 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 
 use super::{BuiltPayload, ExecError, LimitOrderRequest, OrderAck, OrderExecutor, OrderSide, SignedPayload};
+use crate::args::Net;
 use crate::orderbook::book::Exchange;
 
 const HL_MIN_ORDER_NOTIONAL_USD: u64 = 10;
@@ -20,7 +21,7 @@ pub(crate) struct HyperliquidExecutor {
     /// `meta.universe` index; if `None` and `perp_symbol == "BTC"`, [`resolve_asset_index`] uses `0`.
     asset_index: Option<u32>,
     perp_symbol: String,
-    network: String,
+    network: Net,
 }
 
 impl HyperliquidExecutor {
@@ -28,7 +29,7 @@ impl HyperliquidExecutor {
         private_key: String,
         asset_index: Option<u32>,
         perp_symbol: String,
-        network: String,
+        network: Net,
     ) -> Self {
         // Strict: hypersdk expects a 32-byte hex private key (64 hex chars), no `0x` prefix.
         let normalized = private_key.trim();
@@ -207,9 +208,9 @@ impl OrderExecutor for HyperliquidExecutor {
         let reduce_only = v.get("reduce_only").and_then(|x| x.as_bool()).unwrap_or(false);
         let post_only = v.get("post_only").and_then(|x| x.as_bool()).unwrap_or(true);
 
-        let client = match self.network.as_str() {
-            "testnet" => hypercore::testnet(),
-            _ => hypercore::mainnet(),
+        let client = match self.network {
+            Net::Testnet => hypercore::testnet(),
+            Net::Mainnet => hypercore::mainnet(),
         };
         let signer = self.signer()?;
         let batch = BatchOrder {

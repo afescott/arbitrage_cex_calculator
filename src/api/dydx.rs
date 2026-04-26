@@ -12,21 +12,25 @@ use serde_json::Value;
 use std::time::Instant;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// Mainnet indexer WebSocket (see dYdX “Connecting” / endpoints docs).
-const DYDX_INDEXER_WS_URL: &str = "wss://indexer.dydx.trade/v4/ws";
+use crate::args::Net;
 
 pub struct DydxClient {
     tx: tokio::sync::mpsc::Sender<ExchangePrice>,
+    network: Net,
 }
 
 impl DydxClient {
-    pub fn new(tx: tokio::sync::mpsc::Sender<ExchangePrice>) -> Self {
-        DydxClient { tx }
+    pub fn new(tx: tokio::sync::mpsc::Sender<ExchangePrice>, network: Net) -> Self {
+        DydxClient { tx, network }
     }
 
     /// Subscribe to BTC-USD perpetual order book (`BTC-USD` market id on v4).
     pub async fn listen_btc_usdt(&self) {
-        match connect_async(DYDX_INDEXER_WS_URL).await {
+        let url = match self.network {
+            Net::Testnet => "wss://indexer.v4testnet.dydx.exchange/v4/ws",
+            Net::Mainnet => "wss://indexer.dydx.trade/v4/ws",
+        };
+        match connect_async(url).await {
             Ok((ws_stream, _)) => {
                 let (mut write, mut read) = ws_stream.split();
                 let mut subscribed = false;

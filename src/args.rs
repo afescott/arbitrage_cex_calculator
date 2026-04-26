@@ -10,6 +10,24 @@ pub enum Bias {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Net {
+    Mainnet,
+    Testnet,
+}
+
+impl Net {
+    fn parse_flag(flag: &str, value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "mainnet" => Ok(Net::Mainnet),
+            "testnet" => Ok(Net::Testnet),
+            other => Err(format!(
+                "Invalid value for `{flag}`: `{other}` (expected mainnet|testnet)"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutionTuning {
     /// Hard cap on acceptable slippage, in basis points.
     pub max_slippage_bps: u64,
@@ -49,7 +67,7 @@ pub struct Args {
     pub hyperliquid_asset_id: Option<u32>,
     /// Hyperliquid network selection for both market data and execution.
     /// If unset: defaults to `testnet` when `--execute-live 0`, otherwise `mainnet`.
-    pub hyperliquid_network: String,
+    pub hyperliquid_network: Net,
 
     #[cfg(feature = "cex")]
     // Kraken
@@ -67,6 +85,9 @@ pub struct Args {
     pub dydx_private_key: Option<String>,
     /// If set, `DydxExecutor::send` POSTs the planning JSON here (signing service / composite client).
     pub dydx_order_relay_url: Option<String>,
+    /// dYdX network selection for indexer WebSocket market data.
+    /// If unset: defaults to `testnet` when `--execute-live 0`, otherwise `mainnet`.
+    pub dydx_network: Net,
 
     pub bias: Bias,
 
@@ -85,6 +106,7 @@ impl Args {
     /// - With feature `cex`: `--kraken-api-key`, `--kraken-api-secret`, `--binance-api-key`, `--binance-api-secret`
     /// - `--dydx-private-key <KEY>`
     /// - `--dydx-order-relay-url <URL>` (POST planning JSON; run local relay from `dydx-relay/server.cjs`)
+    /// - `--dydx-network <mainnet|testnet>` (optional; default depends on `--execute-live`)
     /// - `--bias <buy|sell>`
     /// - `--budget <USD>` (integer dollars; default `1` for small test runs)
     /// - `--execute-live <0|1>` (default `0`; when `1`, submits real orders)
@@ -181,20 +203,25 @@ impl Args {
 
         let hyperliquid_network = map
             .get("--hyperliquid-network")
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty())
+            .map(|s| Net::parse_flag("--hyperliquid-network", s))
             .unwrap_or_else(|| {
-                if execute_live {
-                    "mainnet".to_string()
+                Ok(if execute_live {
+                    Net::Mainnet
                 } else {
-                    "testnet".to_string()
-                }
-            });
-        if hyperliquid_network != "mainnet" && hyperliquid_network != "testnet" {
-            return Err(format!(
-                "Invalid value for `--hyperliquid-network`: `{hyperliquid_network}` (expected mainnet|testnet)"
-            ));
-        }
+                    Net::Testnet
+                })
+            })?;
+
+        let dydx_network = map
+            .get("--dydx-network")
+            .map(|s| Net::parse_flag("--dydx-network", s))
+            .unwrap_or_else(|| {
+                Ok(if execute_live {
+                    Net::Mainnet
+                } else {
+                    Net::Testnet
+                })
+            })?;
 
         Ok(Self {
             pair,
@@ -214,6 +241,7 @@ impl Args {
             binance_api_secret: map.get("--binance-api-secret").cloned(),
             dydx_private_key: map.get("--dydx-private-key").cloned(),
             dydx_order_relay_url: map.get("--dydx-order-relay-url").cloned(),
+            dydx_network,
             bias,
             budget,
             execute_live,

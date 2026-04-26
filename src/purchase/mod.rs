@@ -100,7 +100,7 @@ impl ExecutorContext {
                 pk,
                 args.hyperliquid_asset_id,
                 args.perp_symbol.clone(),
-                args.hyperliquid_network.clone(),
+                args.hyperliquid_network,
             )
         });
         #[cfg(feature = "cex")]

@@ -77,8 +77,11 @@ async fn run(order_book_name: String, args: Args) {
     });
 
     let dydx_tx = tx.clone();
+    let dydx_network = args.dydx_network.clone();
     let dydx_handle = tokio::spawn(async move {
-        DydxClient::new(dydx_tx).listen_btc_usdt().await;
+        DydxClient::new(dydx_tx, dydx_network)
+            .listen_btc_usdt()
+            .await;
     });
 
     let (tx_purchase, rx_purchase) = tokio::sync::mpsc::channel(50);
