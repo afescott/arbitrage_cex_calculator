@@ -5,14 +5,20 @@
 
 use chrono::Utc;
 use hypersdk::hypercore::{self, types::*, PrivateKeySigner};
+use reqwest::header::CONTENT_TYPE;
+use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use serde_json::Value;
+use std::sync::Arc;
 
 use super::{BuiltPayload, ExecError, LimitOrderRequest, OrderAck, OrderExecutor, OrderSide, SignedPayload};
 use crate::args::Net;
 use crate::orderbook::book::Exchange;
 
 const HL_MIN_ORDER_NOTIONAL_USD: u64 = 10;
+// Hyperliquid enforces "cannot be more than 80% away from reference price".
+// In practice reference != allMids and the check may be strict, so keep a buffer.
+const HL_MAX_DEVIATION_FROM_MID_FRAC: f64 = 0.79;
 
 #[derive(Debug, Clone)]
 pub(crate) struct HyperliquidExecutor {
@@ -22,6 +28,9 @@ pub(crate) struct HyperliquidExecutor {
     asset_index: Option<u32>,
     perp_symbol: String,
     network: Net,
+    http: reqwest::Client,
+    sz_decimals: Arc<tokio::sync::OnceCell<u32>>,
+    resolved_asset: Arc<tokio::sync::OnceCell<u32>>,
 }
 
 impl HyperliquidExecutor {
@@ -42,12 +51,20 @@ impl HyperliquidExecutor {
                 )),
             ),
         };
+        let http = reqwest::Client::builder()
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(8)
+            .build()
+            .expect("reqwest hyperliquid client");
         Self {
             signer,
             signer_err,
             asset_index,
             perp_symbol,
             network,
+            http,
+            sz_decimals: Arc::new(tokio::sync::OnceCell::new()),
+            resolved_asset: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -59,25 +76,188 @@ impl HyperliquidExecutor {
         })
     }
 
-    fn resolve_asset_index(&self) -> Result<u32, ExecError> {
+    fn resolve_asset_index_hint(&self) -> u32 {
+        // If the user specified an explicit universe index, keep it.
+        // Otherwise, we will resolve it dynamically in `send()` from `/info meta`.
+        self.asset_index.unwrap_or(0)
+    }
+
+    fn info_http_url(&self) -> &'static str {
+        match self.network {
+            Net::Testnet => "https://api.hyperliquid-testnet.xyz/info",
+            Net::Mainnet => "https://api.hyperliquid.xyz/info",
+        }
+    }
+
+    async fn fetch_mid_px(&self, coin: &str) -> Result<Decimal, ExecError> {
+        let url = self.info_http_url();
+        let body = serde_json::json!({ "type": "allMids" });
+        let resp = self
+            .http
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid allMids http: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid allMids body: {e}")))?;
+        if !status.is_success() {
+            return Err(ExecError::SendFailed(format!(
+                "hyperliquid allMids HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            )));
+        }
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid allMids json: {e}")))?;
+        let mid_s = v.get(coin).and_then(|x| x.as_str()).ok_or_else(|| {
+            ExecError::SendFailed(format!("hyperliquid allMids: missing mid for coin={coin}"))
+        })?;
+        mid_s
+            .parse::<Decimal>()
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid allMids: bad mid px: {e}")))
+    }
+
+    async fn fetch_mark_px(&self, asset: u32) -> Result<Decimal, ExecError> {
+        let url = self.info_http_url();
+        let body = serde_json::json!({ "type": "metaAndAssetCtxs" });
+        let resp = self
+            .http
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid metaAndAssetCtxs http: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid metaAndAssetCtxs body: {e}")))?;
+        if !status.is_success() {
+            return Err(ExecError::SendFailed(format!(
+                "hyperliquid metaAndAssetCtxs HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            )));
+        }
+
+        // Response is typically: [ { meta: { universe: [...] } }, [ { markPx: "...", ... }, ... ] ]
+        let v: Value = serde_json::from_str(&text).map_err(|e| {
+            ExecError::SendFailed(format!("hyperliquid metaAndAssetCtxs json: {e}"))
+        })?;
+        let mark_s = v
+            .get(1)
+            .and_then(|x| x.as_array())
+            .and_then(|arr| arr.get(asset as usize))
+            .and_then(|ctx| ctx.get("markPx").or_else(|| ctx.get("mark_px")))
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| {
+                ExecError::SendFailed(format!(
+                    "hyperliquid metaAndAssetCtxs: missing markPx for asset={asset}"
+                ))
+            })?;
+        mark_s.parse::<Decimal>().map_err(|e| {
+            ExecError::SendFailed(format!("hyperliquid metaAndAssetCtxs: bad markPx: {e}"))
+        })
+    }
+
+    async fn resolve_sz_decimals(&self, asset: u32) -> Result<u32, ExecError> {
+        // Cache the first fetched value. (This bot currently only trades one perp symbol at a time.)
+        self.sz_decimals
+            .get_or_try_init(|| async move {
+                let url = self.info_http_url();
+                let body = serde_json::json!({ "type": "meta" });
+                let resp = self
+                    .http
+                    .post(url)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .await
+                    .map_err(|e| ExecError::SendFailed(format!("hyperliquid meta http: {e}")))?;
+                let status = resp.status();
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| ExecError::SendFailed(format!("hyperliquid meta body: {e}")))?;
+                if !status.is_success() {
+                    return Err(ExecError::SendFailed(format!(
+                        "hyperliquid meta HTTP {status}: {}",
+                        text.chars().take(800).collect::<String>()
+                    )));
+                }
+                let v: Value = serde_json::from_str(&text)
+                    .map_err(|e| ExecError::SendFailed(format!("hyperliquid meta json: {e}")))?;
+                let sz = v
+                    .pointer("/universe")
+                    .and_then(|u| u.as_array())
+                    .and_then(|arr| arr.get(asset as usize))
+                    .and_then(|obj| obj.get("szDecimals"))
+                    .and_then(|n| n.as_u64())
+                    .ok_or_else(|| {
+                        ExecError::SendFailed(format!(
+                            "hyperliquid meta: could not read universe[{asset}].szDecimals"
+                        ))
+                    })?;
+                Ok(sz as u32)
+            })
+            .await
+            .copied()
+    }
+
+    async fn resolve_asset_index_from_meta(&self) -> Result<u32, ExecError> {
         if let Some(i) = self.asset_index {
             return Ok(i);
         }
-        if self.perp_symbol == "BTC" {
-            return Ok(0);
-        }
-        Err(ExecError::SendFailed(format!(
-            "Hyperliquid: set --hyperliquid-asset-id for perp_symbol={}",
-            self.perp_symbol
-        )))
-    }
-
-    fn qty_step_decimals(&self) -> Option<u32> {
-        if self.perp_symbol == "BTC" {
-            Some(5) // from `info/meta`: BTC szDecimals=5
-        } else {
-            None
-        }
+        // Cache the resolved index for this bot run (single perp symbol).
+        self.resolved_asset
+            .get_or_try_init(|| async move {
+                let url = self.info_http_url();
+                let body = serde_json::json!({ "type": "meta" });
+                let resp = self
+                    .http
+                    .post(url)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .await
+                    .map_err(|e| ExecError::SendFailed(format!("hyperliquid meta http: {e}")))?;
+                let status = resp.status();
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| ExecError::SendFailed(format!("hyperliquid meta body: {e}")))?;
+                if !status.is_success() {
+                    return Err(ExecError::SendFailed(format!(
+                        "hyperliquid meta HTTP {status}: {}",
+                        text.chars().take(800).collect::<String>()
+                    )));
+                }
+                let v: Value = serde_json::from_str(&text)
+                    .map_err(|e| ExecError::SendFailed(format!("hyperliquid meta json: {e}")))?;
+                let universe = v
+                    .pointer("/universe")
+                    .and_then(|u| u.as_array())
+                    .ok_or_else(|| ExecError::SendFailed("hyperliquid meta: missing universe".into()))?;
+                for (i, obj) in universe.iter().enumerate() {
+                    if obj
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .is_some_and(|n| n.eq_ignore_ascii_case(&self.perp_symbol))
+                    {
+                        return Ok(i as u32);
+                    }
+                }
+                Err(ExecError::SendFailed(format!(
+                    "Hyperliquid: could not resolve asset id for perp_symbol={} from /info meta (set --hyperliquid-asset-id)",
+                    self.perp_symbol
+                )))
+            })
+            .await
+            .copied()
     }
 }
 
@@ -119,39 +299,14 @@ impl OrderExecutor for HyperliquidExecutor {
 
     fn build_payload(&self, req: &LimitOrderRequest) -> Result<BuiltPayload, ExecError> {
         // Encode a minimal plan JSON so we keep build→sign→send shape.
-        let asset = self.resolve_asset_index()?;
+        let asset = self.resolve_asset_index_hint();
         let is_buy = matches!(req.side, OrderSide::Buy);
         let limit_px = decimal_from_price_cents(req.price_cents)?;
-        let mut sz = decimal_from_qty_e8(req.qty_sats)?;
-        if let Some(decimals) = self.qty_step_decimals() {
-            sz = truncate_decimal_to_scale(sz, decimals);
-        }
-        if sz <= Decimal::ZERO {
-            return Err(ExecError::SendFailed("hyperliquid: size rounded to 0".into()));
-        }
-
-        // Hyperliquid rejects orders below ~$10 notional. Because we truncate size to the venue
-        // step, a "target $10" order can become $9.99... and get rejected; bump size to the
-        // smallest step that clears the minimum.
-        let min_notional = Decimal::from(HL_MIN_ORDER_NOTIONAL_USD);
-        let notional = limit_px * sz;
-        if notional < min_notional {
-            if limit_px <= Decimal::ZERO {
-                return Err(ExecError::SendFailed("hyperliquid: limit_px must be > 0".into()));
-            }
-            let required_sz = min_notional / limit_px;
-            sz = if let Some(decimals) = self.qty_step_decimals() {
-                ceil_decimal_to_scale(required_sz, decimals)
-            } else {
-                required_sz
-            };
-            if sz <= Decimal::ZERO {
-                return Err(ExecError::SendFailed("hyperliquid: bumped size rounded to 0".into()));
-            }
-        }
+        let sz = decimal_from_qty_e8(req.qty_sats)?;
 
         let root = serde_json::json!({
             "asset": asset,
+            "symbol": req.symbol,
             "is_buy": is_buy,
             "limit_px": limit_px.to_string(),
             "sz": sz.to_string(),
@@ -185,26 +340,107 @@ impl OrderExecutor for HyperliquidExecutor {
         let v: Value = serde_json::from_str(&signed.body)
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid payload parse: {e}")))?;
 
-        let asset = v
-            .get("asset")
-            .and_then(|x| x.as_u64())
-            .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing asset".into()))? as u32;
+        // Always resolve the correct universe index from `/info meta` unless explicitly provided.
+        // This avoids the fragile "BTC is 0" assumption (especially on testnet).
+        let asset = self.resolve_asset_index_from_meta().await?;
         let is_buy = v
             .get("is_buy")
             .and_then(|x| x.as_bool())
             .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing is_buy".into()))?;
-        let limit_px: Decimal = v
+        let mut limit_px: Decimal = v
             .get("limit_px")
             .and_then(|x| x.as_str())
             .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing limit_px".into()))?
             .parse()
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid: bad limit_px: {e}")))?;
-        let sz: Decimal = v
+        let mut sz: Decimal = v
             .get("sz")
             .and_then(|x| x.as_str())
             .ok_or_else(|| ExecError::SendFailed("hyperliquid: missing sz".into()))?
             .parse()
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid: bad sz: {e}")))?;
+
+        // Round/truncate to the venue lot step (szDecimals) for this asset.
+        let sz_decimals = self.resolve_sz_decimals(asset).await?;
+        let floored = truncate_decimal_to_scale(sz, sz_decimals);
+        sz = if floored > Decimal::ZERO {
+            floored
+        } else {
+            // If the requested size is smaller than the minimum step, flooring produces 0.
+            // Round up to the minimum step so we can still satisfy min-notional bumping.
+            ceil_decimal_to_scale(sz, sz_decimals)
+        };
+        if sz <= Decimal::ZERO {
+            return Err(ExecError::SendFailed("hyperliquid: size rounded to 0".into()));
+        }
+
+        // Hyperliquid rejects limit orders that are too far from its reference/mid price.
+        // Instead of submitting a doomed order, clamp into a conservative band around `allMids`.
+        let mid = self.fetch_mid_px(&self.perp_symbol).await?;
+        if mid > Decimal::ZERO {
+            let band = Decimal::from_f64(1.0 - HL_MAX_DEVIATION_FROM_MID_FRAC)
+                .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad band (min)".into()))?;
+            let buffer_lo = Decimal::from_f64(1.001)
+                .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad buffer (lo)".into()))?;
+            let buffer_hi = Decimal::from_f64(0.999)
+                .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad buffer (hi)".into()))?;
+
+            // Conservative band with a small safety margin to avoid edge-case rejects.
+            let min_px = mid * band * buffer_lo;
+            let max_px = mid
+                * Decimal::from_f64(1.0 + HL_MAX_DEVIATION_FROM_MID_FRAC)
+                    .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad band (max)".into()))?
+                * buffer_hi;
+
+            // Clamp toward the nearest acceptable boundary while preserving side intent.
+            // - Buys: too high → clamp down. Too low → clamp up (otherwise far-away junk prices).
+            // - Sells: too low → clamp up. Too high → clamp down.
+            let orig_limit_px = limit_px;
+            if is_buy {
+                if limit_px > max_px {
+                    limit_px = max_px;
+                } else if limit_px < min_px {
+                    limit_px = min_px;
+                }
+            } else {
+                if limit_px < min_px {
+                    limit_px = min_px;
+                } else if limit_px > max_px {
+                    limit_px = max_px;
+                }
+            }
+            if limit_px != orig_limit_px {
+                tracing::warn!(
+                    target: "execution",
+                    exchange = "hyperliquid",
+                    perp = %self.perp_symbol,
+                    is_buy = is_buy,
+                    mid = %mid,
+                    min_px = %min_px,
+                    max_px = %max_px,
+                    orig_limit_px = %orig_limit_px,
+                    clamped_limit_px = %limit_px,
+                    "Clamped limit_px into HL band"
+                );
+            }
+        }
+
+        // Hyperliquid rejects orders below ~$10 notional. Because we truncate size to the venue
+        // step, a "target $10" order can become $9.99... and get rejected; bump size to the
+        // smallest step that clears the minimum.
+        let min_notional = Decimal::from(HL_MIN_ORDER_NOTIONAL_USD);
+        let notional = limit_px * sz;
+        if notional < min_notional {
+            if limit_px <= Decimal::ZERO {
+                return Err(ExecError::SendFailed("hyperliquid: limit_px must be > 0".into()));
+            }
+            let required_sz = min_notional / limit_px;
+            sz = ceil_decimal_to_scale(required_sz, sz_decimals);
+            if sz <= Decimal::ZERO {
+                return Err(ExecError::SendFailed("hyperliquid: bumped size rounded to 0".into()));
+            }
+        }
+
         let reduce_only = v.get("reduce_only").and_then(|x| x.as_bool()).unwrap_or(false);
         let post_only = v.get("post_only").and_then(|x| x.as_bool()).unwrap_or(true);
 
@@ -213,6 +449,23 @@ impl OrderExecutor for HyperliquidExecutor {
             Net::Mainnet => hypercore::mainnet(),
         };
         let signer = self.signer()?;
+
+        let notional_usd = limit_px * sz;
+        let mark_px = self.fetch_mark_px(asset).await.ok();
+        tracing::info!(
+            target: "execution",
+            exchange = "hyperliquid",
+            perp = %self.perp_symbol,
+            asset = asset,
+            is_buy = is_buy,
+            limit_px = %limit_px,
+            sz = %sz,
+            notional_usd = %notional_usd,
+            mid_px = %mid,
+            mark_px = %mark_px.map(|x| x.to_string()).unwrap_or_else(|| "n/a".to_string()),
+            "Place order"
+        );
+
         let batch = BatchOrder {
             orders: vec![OrderRequest {
                 asset: asset
