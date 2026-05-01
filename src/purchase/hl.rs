@@ -28,6 +28,7 @@ pub(crate) struct HyperliquidExecutor {
     asset_index: Option<u32>,
     perp_symbol: String,
     network: Net,
+    ioc_cross_bps: u64,
     http: reqwest::Client,
     sz_decimals: Arc<tokio::sync::OnceCell<u32>>,
     resolved_asset: Arc<tokio::sync::OnceCell<u32>>,
@@ -39,6 +40,7 @@ impl HyperliquidExecutor {
         asset_index: Option<u32>,
         perp_symbol: String,
         network: Net,
+        ioc_cross_bps: u64,
     ) -> Self {
         // Strict: hypersdk expects a 32-byte hex private key (64 hex chars), no `0x` prefix.
         let normalized = private_key.trim();
@@ -62,6 +64,7 @@ impl HyperliquidExecutor {
             asset_index,
             perp_symbol,
             network,
+            ioc_cross_bps,
             http,
             sz_decimals: Arc::new(tokio::sync::OnceCell::new()),
             resolved_asset: Arc::new(tokio::sync::OnceCell::new()),
@@ -119,6 +122,60 @@ impl HyperliquidExecutor {
         mid_s
             .parse::<Decimal>()
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid allMids: bad mid px: {e}")))
+    }
+
+    async fn fetch_top_of_book(&self, coin: &str) -> Result<(Decimal, Decimal), ExecError> {
+        // Returns (best_bid, best_ask) from /info l2Book.
+        let url = self.info_http_url();
+        let body = serde_json::json!({
+            "type": "l2Book",
+            "coin": coin,
+        });
+        let resp = self
+            .http
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid l2Book http: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid l2Book body: {e}")))?;
+        if !status.is_success() {
+            return Err(ExecError::SendFailed(format!(
+                "hyperliquid l2Book HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            )));
+        }
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid l2Book json: {e}")))?;
+        let levels = v
+            .get("levels")
+            .and_then(|l| l.as_array())
+            .ok_or_else(|| ExecError::SendFailed("hyperliquid l2Book: missing levels".into()))?;
+        if levels.len() < 2 {
+            return Err(ExecError::SendFailed(
+                "hyperliquid l2Book: levels too short".into(),
+            ));
+        }
+        let best_bid = levels[0]
+            .as_array()
+            .and_then(|bids| bids.first())
+            .and_then(|o| o.get("px").and_then(|x| x.as_str()))
+            .ok_or_else(|| ExecError::SendFailed("hyperliquid l2Book: missing best bid".into()))?
+            .parse::<Decimal>()
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid l2Book: bad bid px: {e}")))?;
+        let best_ask = levels[1]
+            .as_array()
+            .and_then(|asks| asks.first())
+            .and_then(|o| o.get("px").and_then(|x| x.as_str()))
+            .ok_or_else(|| ExecError::SendFailed("hyperliquid l2Book: missing best ask".into()))?
+            .parse::<Decimal>()
+            .map_err(|e| ExecError::SendFailed(format!("hyperliquid l2Book: bad ask px: {e}")))?;
+        Ok((best_bid, best_ask))
     }
 
     async fn fetch_mark_px(&self, asset: u32) -> Result<Decimal, ExecError> {
@@ -444,6 +501,23 @@ impl OrderExecutor for HyperliquidExecutor {
         let reduce_only = v.get("reduce_only").and_then(|x| x.as_bool()).unwrap_or(false);
         let post_only = v.get("post_only").and_then(|x| x.as_bool()).unwrap_or(true);
 
+        // For IOC orders, ensure we actually cross the Hyperliquid spread so the order can match.
+        // This is the main fix for "could not immediately match".
+        if !post_only && self.ioc_cross_bps > 0 {
+            let (best_bid, best_ask) = self.fetch_top_of_book(&self.perp_symbol).await?;
+            let cross = Decimal::from_f64(1.0 + (self.ioc_cross_bps as f64 / 10_000.0))
+                .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad cross factor".into()))?;
+            if is_buy {
+                // Buy: cross above ask a bit.
+                limit_px = best_ask * cross;
+            } else {
+                // Sell: cross below bid a bit.
+                let down = Decimal::from_f64(1.0 - (self.ioc_cross_bps as f64 / 10_000.0))
+                    .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad cross factor".into()))?;
+                limit_px = best_bid * down;
+            }
+        }
+
         let client = match self.network {
             Net::Testnet => hypercore::testnet(),
             Net::Mainnet => hypercore::mainnet(),
@@ -488,6 +562,9 @@ impl OrderExecutor for HyperliquidExecutor {
             .place(signer, batch, nonce, None, None)
             .await
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid place: {e}")))?;
+
+        // Temporary debug: print the first order status so we can see fill vs resting vs error details.
+        println!("hyperliquid status[0]: {:?}", statuses.first());
 
         if let Some(first) = statuses.first() {
             if !first.is_ok() {

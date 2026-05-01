@@ -68,6 +68,9 @@ pub struct Args {
     /// Hyperliquid network selection for both market data and execution.
     /// If unset: defaults to `testnet` when `--execute-live 0`, otherwise `mainnet`.
     pub hyperliquid_network: Net,
+    /// For IOC orders on Hyperliquid, cross the spread by this many bps to improve fill rate.
+    /// (Used only when `post_only=false`.)
+    pub hyperliquid_ioc_cross_bps: u64,
 
     #[cfg(feature = "cex")]
     // Kraken
@@ -112,6 +115,7 @@ impl Args {
     /// - `--execute-live <0|1>` (default `0`; when `1`, submits real orders)
     /// - `--hyperliquid-asset-id <N>` (perp index in `meta.universe`; optional for `BTC` default guess `0`)
     /// - `--hyperliquid-network <mainnet|testnet>` (optional; default depends on `--execute-live`)
+    /// - `--hyperliquid-ioc-cross-bps <BPS>` (optional; default `2`)
     /// - `--perp-symbol <SYM>` (e.g. `SOL`; defaults from `--pair` before `/` or `BTC`)
     /// - `--notional-usd-per-leg <USD>` (integer; default: `budget/2`, capped by leverage field below)
     /// - `--max-margin-leverage <N>` (integer ≥ 1, default `3`) caps default/explicit notional per leg
@@ -136,6 +140,20 @@ impl Args {
             }
         }
 
+        fn env_trimmed(key: &str) -> Option<String> {
+            std::env::var(key)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        }
+
+        fn cli_or_env(map: &HashMap<String, String>, cli: &str, env_key: &str) -> Option<String> {
+            map.get(cli)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| env_trimmed(env_key))
+        }
+
         let bias = match map
             .get("--bias")
             .map(|s| s.trim().to_ascii_lowercase())
@@ -146,15 +164,15 @@ impl Args {
             Some(other) => return Err(format!("Invalid value for `--bias`: `{other}`")),
         };
 
-        let budget = match map.get("--budget") {
+        let budget = match cli_or_env(&map, "--budget", "BUDGET").as_deref() {
             Some(v) => v
                 .parse::<u64>()
                 .map_err(|_| format!("Invalid value for `--budget`: `{v}`"))?,
             None => 1,
         };
 
-        let execute_live = match map
-            .get("--execute-live")
+        let execute_live = match cli_or_env(&map, "--execute-live", "EXECUTE_LIVE")
+            .as_deref()
             .map(|s| s.trim().to_ascii_lowercase())
             .as_deref()
         {
@@ -163,7 +181,7 @@ impl Args {
             Some(other) => return Err(format!("Invalid value for `--execute-live`: `{other}`")),
         };
 
-        let pair = map.get("--pair").cloned();
+        let pair = cli_or_env(&map, "--pair", "PAIR");
 
         let perp_symbol = map
             .get("--perp-symbol")
@@ -177,7 +195,9 @@ impl Args {
             })
             .unwrap_or_else(|| "BTC".to_string());
 
-        let notional_usd_per_leg = match map.get("--notional-usd-per-leg") {
+        let notional_usd_per_leg = match cli_or_env(&map, "--notional-usd-per-leg", "NOTIONAL_USD_PER_LEG")
+            .as_deref()
+        {
             Some(v) => Some(
                 v.parse::<u64>()
                     .map_err(|_| format!("Invalid value for `--notional-usd-per-leg`: `{v}`"))?,
@@ -185,24 +205,28 @@ impl Args {
             None => None,
         };
 
-        let max_margin_leverage_assumption = match map.get("--max-margin-leverage") {
-            Some(v) => v
-                .parse::<u64>()
-                .map_err(|_| format!("Invalid value for `--max-margin-leverage`: `{v}`"))?
-                .max(1),
-            None => 3,
-        };
+        let max_margin_leverage_assumption =
+            match cli_or_env(&map, "--max-margin-leverage", "MAX_MARGIN_LEVERAGE")
+                .as_deref()
+            {
+                Some(v) => v
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid value for `--max-margin-leverage`: `{v}`"))?
+                    .max(1),
+                None => 3,
+            };
 
-        let hyperliquid_asset_id = match map.get("--hyperliquid-asset-id") {
-            Some(v) => Some(
-                v.parse::<u32>()
-                    .map_err(|_| format!("Invalid value for `--hyperliquid-asset-id`: `{v}`"))?,
-            ),
-            None => None,
-        };
+        let hyperliquid_asset_id =
+            match cli_or_env(&map, "--hyperliquid-asset-id", "HYPERLIQUID_ASSET_ID").as_deref() {
+                Some(v) => Some(
+                    v.parse::<u32>()
+                        .map_err(|_| format!("Invalid value for `--hyperliquid-asset-id`: `{v}`"))?,
+                ),
+                None => None,
+            };
 
-        let hyperliquid_network = map
-            .get("--hyperliquid-network")
+        let hyperliquid_network = cli_or_env(&map, "--hyperliquid-network", "HYPERLIQUID_NETWORK")
+            .as_deref()
             .map(|s| Net::parse_flag("--hyperliquid-network", s))
             .unwrap_or_else(|| {
                 Ok(if execute_live {
@@ -212,8 +236,18 @@ impl Args {
                 })
             })?;
 
-        let dydx_network = map
-            .get("--dydx-network")
+        let hyperliquid_ioc_cross_bps =
+            match cli_or_env(&map, "--hyperliquid-ioc-cross-bps", "HYPERLIQUID_IOC_CROSS_BPS")
+                .as_deref()
+            {
+                Some(v) => v
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid value for `--hyperliquid-ioc-cross-bps`: `{v}`"))?,
+                None => 2,
+            };
+
+        let dydx_network = cli_or_env(&map, "--dydx-network", "DYDX_NETWORK")
+            .as_deref()
             .map(|s| Net::parse_flag("--dydx-network", s))
             .unwrap_or_else(|| {
                 Ok(if execute_live {
@@ -228,9 +262,10 @@ impl Args {
             perp_symbol,
             notional_usd_per_leg,
             max_margin_leverage_assumption,
-            hyperliquid_private_key: map.get("--hyperliquid-private-key").cloned(),
+            hyperliquid_private_key: cli_or_env(&map, "--hyperliquid-private-key", "HYPERLIQUID_PRIVATE_KEY"),
             hyperliquid_asset_id,
             hyperliquid_network,
+            hyperliquid_ioc_cross_bps,
             #[cfg(feature = "cex")]
             kraken_api_key: map.get("--kraken-api-key").cloned(),
             #[cfg(feature = "cex")]
@@ -239,8 +274,8 @@ impl Args {
             binance_api_key: map.get("--binance-api-key").cloned(),
             #[cfg(feature = "cex")]
             binance_api_secret: map.get("--binance-api-secret").cloned(),
-            dydx_private_key: map.get("--dydx-private-key").cloned(),
-            dydx_order_relay_url: map.get("--dydx-order-relay-url").cloned(),
+            dydx_private_key: cli_or_env(&map, "--dydx-private-key", "DYDX_PRIVATE_KEY"),
+            dydx_order_relay_url: cli_or_env(&map, "--dydx-order-relay-url", "DYDX_ORDER_RELAY_URL"),
             dydx_network,
             bias,
             budget,

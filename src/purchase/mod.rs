@@ -101,6 +101,7 @@ impl ExecutorContext {
                 args.hyperliquid_asset_id,
                 args.perp_symbol.clone(),
                 args.hyperliquid_network,
+                args.hyperliquid_ioc_cross_bps,
             )
         });
         #[cfg(feature = "cex")]

@@ -3,3 +3,5 @@
 /src/calculation
 /examples
 /dydx-relay/node_modules
+.env
+.env.*
