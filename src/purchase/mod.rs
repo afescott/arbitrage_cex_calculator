@@ -9,6 +9,8 @@ mod dydx;
 mod hl;
 
 use crate::{args::Args, calculation::BuyExchangeSellExchange, orderbook::book::Exchange, sizing};
+#[cfg(feature = "csv")]
+use crate::metrics::csv::{CsvEvent, CsvOrderAttempt};
 
 /// Hyperliquid `s` field and dYdX planning `quantums`: decimal string from base qty × 1e8.
 pub(crate) fn qty_sats_to_decimal_string(qty_sats: u64) -> String {
@@ -195,9 +197,39 @@ pub struct PurchaseManager {
     perp_symbol: String,
     notional_usd_per_leg: u64,
     execute_live: bool,
+    #[cfg(feature = "csv")]
+    csv_tx: Option<tokio::sync::mpsc::Sender<CsvEvent>>,
 }
 
 impl PurchaseManager {
+    #[cfg(feature = "csv")]
+    pub fn new(
+        rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>,
+        args: Args,
+        csv_tx: Option<tokio::sync::mpsc::Sender<CsvEvent>>,
+    ) -> Self {
+        let notional_usd_per_leg = args.clamped_notional_usd_per_leg();
+        let perp_symbol = args.perp_symbol.clone();
+        let execute_live = args.execute_live;
+        let order = ExecutorContext::new(&args);
+        eprintln!(
+            "Purchase sizing: perp={} notional_usd_per_leg={} (budget={}, cap uses max_margin_leverage={})",
+            perp_symbol,
+            notional_usd_per_leg,
+            args.budget,
+            args.max_margin_leverage_assumption
+        );
+        Self {
+            rx,
+            order,
+            perp_symbol,
+            notional_usd_per_leg,
+            execute_live,
+            csv_tx,
+        }
+    }
+
+    #[cfg(not(feature = "csv"))]
     pub fn new(rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>, args: Args) -> Self {
         let notional_usd_per_leg = args.clamped_notional_usd_per_leg();
         let perp_symbol = args.perp_symbol.clone();
@@ -304,6 +336,19 @@ impl PurchaseManager {
         };
         let res_first = submit_limit_order(&self.order, first).await;
         println!("First leg submit result: {:?}", res_first);
+        #[cfg(feature = "csv")]
+        self.emit_order_attempt(
+            "first",
+            route.buy_exchange,
+            OrderSide::Buy,
+            route.buy_price,
+            qty_sats,
+            false,
+            false,
+            res_first.as_ref().map(|_| ()).map_err(|e| format!("{e:?}")),
+            Some(route.profit_expect),
+        )
+        .await;
         if res_first.is_err() {
             println!("Skipping second leg: first leg failed at submit-time.");
             return;
@@ -320,5 +365,57 @@ impl PurchaseManager {
         };
         let res_second = submit_limit_order(&self.order, second).await;
         println!("Second leg submit result: {:?}", res_second);
+        #[cfg(feature = "csv")]
+        self.emit_order_attempt(
+            "second",
+            route.sell_exchange,
+            OrderSide::Sell,
+            route.sell_price,
+            qty_sats,
+            false,
+            false,
+            res_second.as_ref().map(|_| ()).map_err(|e| format!("{e:?}")),
+            Some(route.profit_expect),
+        )
+        .await;
+    }
+}
+
+#[cfg(feature = "csv")]
+impl PurchaseManager {
+    async fn emit_order_attempt(
+        &self,
+        leg: &'static str,
+        exchange: Exchange,
+        side: OrderSide,
+        price_cents: u64,
+        qty_e8: u64,
+        post_only: bool,
+        reduce_only: bool,
+        result: Result<(), String>,
+        profit_expect_bps: Option<u64>,
+    ) {
+        let Some(tx) = self.csv_tx.as_ref() else {
+            return;
+        };
+        let (ok, err) = match result {
+            Ok(()) => (true, None),
+            Err(e) => (false, Some(e)),
+        };
+        let ev = CsvOrderAttempt {
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+            leg,
+            exchange,
+            side,
+            price_cents,
+            qty_e8,
+            post_only,
+            reduce_only,
+            ok,
+            err,
+            profit_expect_bps,
+        };
+        // Best-effort: if metrics channel is full, drop the record rather than stalling execution.
+        let _ = tx.try_send(CsvEvent::OrderAttempt(ev));
     }
 }

@@ -70,20 +70,6 @@ tokio-console
 RUSTFLAGS="-C force-frame-pointers=y" cargo run --bin security_flamegraph_lowlatency
 ```
 
-## Security Practices
-
-- **Dependency auditing**: `cargo audit`
-- **Input validation**: Sanitize all external inputs
-- **Secure defaults**: No unsafe code unless absolutely necessary
-- **Memory safety**: Leverage Rust's ownership system
-
-## Performance Tips
-
-- Use `--release` builds for benchmarking
-- Set CPU affinity for consistent latency
-- Profile with flamegraph to identify hotspots
-- Monitor async runtime with tokio-console
-
 ## Project Ideas
 
 ### Recommended: Order Book Aggregator

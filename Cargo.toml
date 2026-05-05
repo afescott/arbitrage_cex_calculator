@@ -7,6 +7,8 @@ edition = "2021"
 default = []
 ## Centralized exchange WebSocket feeds (Binance, Kraken) + Binance futures HMAC signing.
 cex = ["dep:hmac", "dep:sha2", "dep:hex"]
+## Optional CSV metrics writer (order attempts + run summary).
+csv = []
 
 [dependencies]
 crossbeam-channel = "0.5"

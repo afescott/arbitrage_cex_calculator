@@ -5,3 +5,11 @@
 /dydx-relay/node_modules
 .env
 .env.*
+
+# Local run artifacts (CSV metrics)
+run.csv
+*.run.csv
+lock.run.csv
+
+# Editor lockfiles (LibreOffice, etc.)
+.~lock*.csv*

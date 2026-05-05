@@ -98,6 +98,10 @@ pub struct Args {
 
     /// 0 = no live orders (dry run); 1 = submit real orders.
     pub execute_live: bool,
+
+    /// Optional CSV metrics output path (feature = "csv").
+    #[cfg(feature = "csv")]
+    pub csv_path: Option<String>,
 }
 
 impl Args {
@@ -119,6 +123,7 @@ impl Args {
     /// - `--perp-symbol <SYM>` (e.g. `SOL`; defaults from `--pair` before `/` or `BTC`)
     /// - `--notional-usd-per-leg <USD>` (integer; default: `budget/2`, capped by leverage field below)
     /// - `--max-margin-leverage <N>` (integer ≥ 1, default `3`) caps default/explicit notional per leg
+    /// - With feature `csv`: `--csv-path <PATH>` or `CSV_PATH=<PATH>` to enable metrics output
     ///
     /// Unknown flags are ignored to keep this lightweight.
     pub fn from_env() -> Result<Self, String> {
@@ -257,6 +262,9 @@ impl Args {
                 })
             })?;
 
+        #[cfg(feature = "csv")]
+        let csv_path = cli_or_env(&map, "--csv-path", "CSV_PATH");
+
         Ok(Self {
             pair,
             perp_symbol,
@@ -280,6 +288,8 @@ impl Args {
             bias,
             budget,
             execute_live,
+            #[cfg(feature = "csv")]
+            csv_path,
         })
     }
 

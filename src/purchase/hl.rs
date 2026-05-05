@@ -8,6 +8,7 @@ use hypersdk::hypercore::{self, types::*, PrivateKeySigner};
 use reqwest::header::CONTENT_TYPE;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
+use rust_decimal::MathematicalOps;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -349,6 +350,38 @@ fn ceil_decimal_to_scale(d: Decimal, scale: u32) -> Decimal {
     v
 }
 
+fn round_hyperliquid_perp_px(px: Decimal, sz_decimals: u32) -> Result<Decimal, ExecError> {
+    // Mirrors Hyperliquid python-sdk `examples/rounding.py` for perps:
+    // - If px > 100k: round to integer
+    // - Else: px = round(float(f"{px:.5g}"), 6 - szDecimals)
+    let abs_px = px.abs();
+    if abs_px > Decimal::from(100_000) {
+        return Ok(px.round());
+    }
+
+    let max_decimals: u32 = 6;
+    let frac_decimals = max_decimals.saturating_sub(sz_decimals);
+
+    // 5 significant figures without scientific-notation string parsing (rust_decimal `FromStr`
+    // does not accept `1.23e4` style inputs reliably).
+    fn round_to_n_significant_figures(x: Decimal, n: u32) -> Decimal {
+        if x.is_zero() {
+            return x;
+        }
+        let ax = x.abs();
+        let exp = ax.log10().floor();
+        let k = exp - Decimal::from((n as i64) - 1);
+        let factor = Decimal::TEN.powd(k);
+        (x / factor).round() * factor
+    }
+
+    let rounded_sig = round_to_n_significant_figures(px, 5);
+
+    let mut out = rounded_sig.round_dp(frac_decimals);
+    out = out.normalize();
+    Ok(out)
+}
+
 impl OrderExecutor for HyperliquidExecutor {
     fn venue(&self) -> Exchange {
         Exchange::Hyperliquid
@@ -486,7 +519,7 @@ impl OrderExecutor for HyperliquidExecutor {
         // step, a "target $10" order can become $9.99... and get rejected; bump size to the
         // smallest step that clears the minimum.
         let min_notional = Decimal::from(HL_MIN_ORDER_NOTIONAL_USD);
-        let notional = limit_px * sz;
+        let mut notional = limit_px * sz;
         if notional < min_notional {
             if limit_px <= Decimal::ZERO {
                 return Err(ExecError::SendFailed("hyperliquid: limit_px must be > 0".into()));
@@ -505,16 +538,30 @@ impl OrderExecutor for HyperliquidExecutor {
         // This is the main fix for "could not immediately match".
         if !post_only && self.ioc_cross_bps > 0 {
             let (best_bid, best_ask) = self.fetch_top_of_book(&self.perp_symbol).await?;
-            let cross = Decimal::from_f64(1.0 + (self.ioc_cross_bps as f64 / 10_000.0))
-                .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad cross factor".into()))?;
+            let bps = Decimal::from(self.ioc_cross_bps as i64);
+            let ten_k = Decimal::from(10_000);
             if is_buy {
                 // Buy: cross above ask a bit.
-                limit_px = best_ask * cross;
+                limit_px = best_ask * (Decimal::ONE + bps / ten_k);
             } else {
                 // Sell: cross below bid a bit.
-                let down = Decimal::from_f64(1.0 - (self.ioc_cross_bps as f64 / 10_000.0))
-                    .ok_or_else(|| ExecError::SendFailed("hyperliquid: bad cross factor".into()))?;
-                limit_px = best_bid * down;
+                limit_px = best_bid * (Decimal::ONE - bps / ten_k);
+            }
+        }
+
+        // IOC crossing can introduce too many sigfigs/decimals for Hyperliquid's wire format.
+        limit_px = round_hyperliquid_perp_px(limit_px, sz_decimals)?;
+
+        // Re-check min notional after IOC repricing (size step rounding can interact with px rounding).
+        notional = limit_px * sz;
+        if notional < min_notional {
+            if limit_px <= Decimal::ZERO {
+                return Err(ExecError::SendFailed("hyperliquid: limit_px must be > 0".into()));
+            }
+            let required_sz = min_notional / limit_px;
+            sz = ceil_decimal_to_scale(required_sz, sz_decimals);
+            if sz <= Decimal::ZERO {
+                return Err(ExecError::SendFailed("hyperliquid: bumped size rounded to 0".into()));
             }
         }
 

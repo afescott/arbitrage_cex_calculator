@@ -1,6 +1,7 @@
 mod api;
 mod args;
 mod calculation;
+mod metrics;
 mod orderbook;
 mod purchase;
 mod sizing;
@@ -91,13 +92,46 @@ async fn run(order_book_name: String, args: Args) {
     let aggregator_handle =
         crate::orderbook::spawn_exchange_price_aggregator(orderbook, rx, tx_purchase);
 
+    #[cfg(feature = "csv")]
+    let csv_handle = {
+        use std::path::PathBuf;
+        let path = args
+            .csv_path
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if path.is_empty() {
+            None
+        } else {
+            let run_label = format!(
+                "{}-{}",
+                args.perp_symbol,
+                chrono::Utc::now().timestamp_millis()
+            );
+            Some(crate::metrics::csv::start_csv_writer(
+                PathBuf::from(path),
+                run_label,
+            ))
+        }
+    };
+
+    #[cfg(feature = "csv")]
+    let csv_tx_opt = csv_handle.as_ref().map(|h| h.tx.clone());
+
     let purchase_handle = tokio::spawn(async move {
+        #[cfg(feature = "csv")]
+        let mut pm = PurchaseManager::new(rx_purchase, args, csv_tx_opt);
+        #[cfg(not(feature = "csv"))]
         let mut pm = PurchaseManager::new(rx_purchase, args);
         pm.run_purchase_simulation().await;
     });
 
     // Wait for all tasks (they run indefinitely)
     tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("ctrl-c: shutting down");
+        }
         /* _ = binance_handle => {
             // info!("Binance task ended");
         }
@@ -119,6 +153,13 @@ async fn run(order_book_name: String, args: Args) {
         _ = purchase_handle => {
             // info!("Purchase manager task ended");
         }
+    }
+
+    // Best-effort cleanup on shutdown.
+    #[cfg(feature = "csv")]
+    if let Some(h) = csv_handle {
+        drop(h.tx);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), h.join).await;
     }
 }
 
