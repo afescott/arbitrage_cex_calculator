@@ -15,10 +15,11 @@ pub struct ArbitrageOpportunity {
     pub buy_price: u64,
     /// Price per unit to sell at (in cents)
     pub sell_price: u64,
-    /// Net profit after fees (in cents)
-    pub profit_cents: u64,
-    /// Gross profit before fees (in cents)
-    pub gross_profit_cents: u64,
+    /// Net profit after fees: `(sell_price - buy_price)` per unit × `quantity`, minus fee terms
+    /// (same units as `gross_profit_total`: cents × base_qty_e8).
+    pub net_profit_total: u64,
+    /// Gross profit before fees (same units as `net_profit_total`).
+    pub gross_profit_total: u64,
     /// Quantity available for arbitrage
     pub quantity: u64,
     /// When this opportunity was detected
@@ -44,8 +45,8 @@ impl ArbitrageOpportunity {
             sell_exchange,
             buy_price,
             sell_price,
-            profit_cents: net_profit / 100_000_000,
-            gross_profit_cents: gross_profit,
+            net_profit_total: net_profit,
+            gross_profit_total: gross_profit,
             quantity,
             detected_at,
             age_ms,
@@ -54,10 +55,15 @@ impl ArbitrageOpportunity {
 
     /// Calculate profit percentage (as basis points)
     pub fn profit_bps(&self) -> u64 {
-        if self.buy_price == 0 {
+        if self.buy_price == 0 || self.quantity == 0 {
             return 0;
         }
-        (self.profit_cents * 10000) / self.buy_price
+        // Notional on buy leg in "cents × qty" units matches `net_profit_total` scaling.
+        let denom = (self.buy_price as u128).saturating_mul(self.quantity as u128);
+        if denom == 0 {
+            return 0;
+        }
+        ((self.net_profit_total as u128) * 10_000 / denom) as u64
     }
 
     /// Check if opportunity is stale (older than threshold)
@@ -292,7 +298,8 @@ mod tests {
         let opp = opportunity.unwrap();
         assert_eq!(opp.buy_exchange, Exchange::Coinbase);
         assert_eq!(opp.sell_exchange, Exchange::Binance);
-        assert!(opp.profit_cents > 0);
+        assert!(opp.net_profit_total > 0);
+        assert!(opp.profit_bps() > 0);
     }
 
     #[test]
@@ -342,7 +349,8 @@ mod tests {
         let opp = opportunity.unwrap();
         assert_eq!(opp.buy_exchange, Exchange::Binance);
         assert_eq!(opp.sell_exchange, Exchange::Coinbase);
-        assert!(opp.profit_cents > 0);
+        assert!(opp.net_profit_total > 0);
+        assert!(opp.profit_bps() > 0);
     }
 
     #[test]

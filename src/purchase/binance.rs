@@ -114,6 +114,8 @@ impl OrderExecutor for BinanceFuturesExecutor {
         Ok(OrderAck {
             exchange: Exchange::Binance,
             client_order_id: "binance-http-ack".to_string(),
+            filled_qty_e8: None,
+            venue_order_id: None,
         })
     }
 }

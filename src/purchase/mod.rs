@@ -10,7 +10,7 @@ mod hl;
 
 use crate::{args::Args, calculation::BuyExchangeSellExchange, orderbook::book::Exchange, sizing};
 #[cfg(feature = "csv")]
-use crate::metrics::csv::{CsvEvent, CsvOrderAttempt};
+use crate::metrics::csv::{CsvEvent, CsvOrderAttempt, CsvRouteOutcome};
 
 /// Hyperliquid `s` field and dYdX planning `quantums`: decimal string from base qty × 1e8.
 pub(crate) fn qty_sats_to_decimal_string(qty_sats: u64) -> String {
@@ -52,6 +52,14 @@ pub struct LimitOrderRequest {
 pub struct OrderAck {
     pub exchange: Exchange,
     pub client_order_id: String,
+    /// Filled base quantity × 1e8, if the venue reports an immediate fill amount.
+    ///
+    /// - `Some(0)`: explicitly known to be unfilled at submit-time
+    /// - `Some(n>0)`: known immediate filled size (may be partial)
+    /// - `None`: venue/transport did not provide fill information
+    pub filled_qty_e8: Option<u64>,
+    /// Venue order id, when available.
+    pub venue_order_id: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -337,21 +345,80 @@ impl PurchaseManager {
         let res_first = submit_limit_order(&self.order, first).await;
         println!("First leg submit result: {:?}", res_first);
         #[cfg(feature = "csv")]
-        self.emit_order_attempt(
-            "first",
-            route.buy_exchange,
-            OrderSide::Buy,
-            route.buy_price,
-            qty_sats,
-            false,
-            false,
-            res_first.as_ref().map(|_| ()).map_err(|e| format!("{e:?}")),
-            Some(route.profit_expect),
-        )
-        .await;
-        if res_first.is_err() {
-            println!("Skipping second leg: first leg failed at submit-time.");
-            return;
+        match res_first.as_ref() {
+            Ok(ack) => {
+                self.emit_order_attempt(
+                    "first",
+                    route.buy_exchange,
+                    OrderSide::Buy,
+                    route.buy_price,
+                    qty_sats,
+                    ack.filled_qty_e8,
+                    false,
+                    false,
+                    Ok(()),
+                    Some(route.profit_expect),
+                )
+                .await;
+            }
+            Err(e) => {
+                self.emit_order_attempt(
+                    "first",
+                    route.buy_exchange,
+                    OrderSide::Buy,
+                    route.buy_price,
+                    qty_sats,
+                    None,
+                    false,
+                    false,
+                    Err(format!("{e:?}")),
+                    Some(route.profit_expect),
+                )
+                .await;
+            }
+        };
+        let first_ack = match res_first {
+            Ok(a) => a,
+            Err(_) => {
+                println!("Skipping second leg: first leg failed at submit-time.");
+                #[cfg(feature = "csv")]
+                self.emit_route_outcome(route, qty_sats, false, false).await;
+                return;
+            }
+        };
+
+        // Hedge safety: only place leg2 when we can confirm leg1 actually filled.
+        // For Hyperliquid IOC, `filled_qty_e8` is derived from the immediate response.
+        // For other venues, fill info is currently unknown; we prefer skipping leg2
+        // over risking an unhedged position.
+        let filled_qty = match first_ack.filled_qty_e8 {
+            Some(0) => {
+                println!("Skipping second leg: first leg submit OK but filled_qty_e8=0 (no fill).");
+                #[cfg(feature = "csv")]
+                self.emit_route_outcome(route, qty_sats, true, false).await;
+                return;
+            }
+            Some(q) => q,
+            None => {
+                if route.sell_exchange == Exchange::Hyperliquid {
+                    println!(
+                        "WARNING: first leg submit OK but fill is unknown; still placing Hyperliquid hedge leg (qty_e8={}).",
+                        qty_sats
+                    );
+                    qty_sats
+                } else {
+                    println!("Skipping second leg: first leg submit OK but fill is unknown (no fill tracking for this venue yet).");
+                    #[cfg(feature = "csv")]
+                    self.emit_route_outcome(route, qty_sats, true, false).await;
+                    return;
+                }
+            }
+        };
+        if filled_qty != qty_sats {
+            println!(
+                "First leg filled partially: requested_qty_e8={} filled_qty_e8={}",
+                qty_sats, filled_qty
+            );
         }
 
         let second = LimitOrderRequest {
@@ -359,25 +426,48 @@ impl PurchaseManager {
             symbol: sym,
             side: OrderSide::Sell,
             price_cents: route.sell_price,
-            qty_sats,
+            qty_sats: filled_qty,
             post_only: false,
             reduce_only: false,
         };
         let res_second = submit_limit_order(&self.order, second).await;
         println!("Second leg submit result: {:?}", res_second);
         #[cfg(feature = "csv")]
-        self.emit_order_attempt(
-            "second",
-            route.sell_exchange,
-            OrderSide::Sell,
-            route.sell_price,
-            qty_sats,
-            false,
-            false,
-            res_second.as_ref().map(|_| ()).map_err(|e| format!("{e:?}")),
-            Some(route.profit_expect),
-        )
-        .await;
+        match res_second.as_ref() {
+            Ok(ack) => {
+                self.emit_order_attempt(
+                    "second",
+                    route.sell_exchange,
+                    OrderSide::Sell,
+                    route.sell_price,
+                    filled_qty,
+                    ack.filled_qty_e8,
+                    false,
+                    false,
+                    Ok(()),
+                    Some(route.profit_expect),
+                )
+                .await;
+            }
+            Err(e) => {
+                self.emit_order_attempt(
+                    "second",
+                    route.sell_exchange,
+                    OrderSide::Sell,
+                    route.sell_price,
+                    filled_qty,
+                    None,
+                    false,
+                    false,
+                    Err(format!("{e:?}")),
+                    Some(route.profit_expect),
+                )
+                .await;
+            }
+        };
+        #[cfg(feature = "csv")]
+        self.emit_route_outcome(route, filled_qty, true, res_second.is_ok())
+            .await;
     }
 }
 
@@ -390,6 +480,7 @@ impl PurchaseManager {
         side: OrderSide,
         price_cents: u64,
         qty_e8: u64,
+        filled_qty_e8: Option<u64>,
         post_only: bool,
         reduce_only: bool,
         result: Result<(), String>,
@@ -409,6 +500,7 @@ impl PurchaseManager {
             side,
             price_cents,
             qty_e8,
+            filled_qty_e8,
             post_only,
             reduce_only,
             ok,
@@ -417,5 +509,28 @@ impl PurchaseManager {
         };
         // Best-effort: if metrics channel is full, drop the record rather than stalling execution.
         let _ = tx.try_send(CsvEvent::OrderAttempt(ev));
+    }
+
+    async fn emit_route_outcome(
+        &self,
+        route: &BuyExchangeSellExchange,
+        qty_e8: u64,
+        first_ok: bool,
+        second_ok: bool,
+    ) {
+        let Some(tx) = self.csv_tx.as_ref() else {
+            return;
+        };
+        let ev = CsvRouteOutcome {
+            buy_exchange: route.buy_exchange,
+            sell_exchange: route.sell_exchange,
+            buy_price_cents: route.buy_price,
+            sell_price_cents: route.sell_price,
+            qty_e8,
+            profit_expect_bps: route.profit_expect,
+            first_ok,
+            second_ok,
+        };
+        let _ = tx.try_send(CsvEvent::RouteOutcome(ev));
     }
 }

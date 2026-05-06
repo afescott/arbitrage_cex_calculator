@@ -159,6 +159,8 @@ impl OrderExecutor for DydxExecutor {
         Ok(OrderAck {
             exchange: Exchange::Dydx,
             client_order_id,
+            filled_qty_e8: None,
+            venue_order_id: None,
         })
     }
 }

@@ -47,6 +47,12 @@ impl FeeCalculator {
     pub fn new(rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>) -> Self {
         Self { rx }
     }
+
+    /// Published taker fee for `exchange`, in basis points (for notional × bps / 10_000 fee estimates).
+    pub fn taker_fee_bps(exchange: Exchange) -> u64 {
+        Self::get_exchange_fee(exchange).taker_bps
+    }
+
     /// Get fee structure for a specific exchange
     fn get_exchange_fee(exchange: Exchange) -> ExchangeFee {
         match exchange {

@@ -9,6 +9,7 @@ use reqwest::header::CONTENT_TYPE;
 use rust_decimal::prelude::FromPrimitive;
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
+use rust_decimal::prelude::ToPrimitive;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -613,17 +614,31 @@ impl OrderExecutor for HyperliquidExecutor {
         // Temporary debug: print the first order status so we can see fill vs resting vs error details.
         println!("hyperliquid status[0]: {:?}", statuses.first());
 
-        if let Some(first) = statuses.first() {
-            if !first.is_ok() {
-                return Err(ExecError::SendFailed(format!("hyperliquid: {first:?}")));
-            }
+        let first = statuses.first().ok_or_else(|| {
+            ExecError::SendFailed("hyperliquid: empty order status response".into())
+        })?;
+        if !first.is_ok() {
+            return Err(ExecError::SendFailed(format!("hyperliquid: {first:?}")));
         }
+
+        // If IOC, the critical distinction is whether we actually got an immediate fill.
+        // hypersdk exposes the fill size on `Filled { total_sz, .. }`.
+        let (filled_qty_e8, venue_order_id) = match first {
+            OrderResponseStatus::Filled { total_sz, oid, .. } => {
+                let qty = (total_sz * Decimal::from(100_000_000u64))
+                    .round()
+                    .to_u64()
+                    .unwrap_or(0);
+                (Some(qty), Some(*oid))
+            }
+            other => (Some(0), other.oid()),
+        };
+
         Ok(OrderAck {
             exchange: Exchange::Hyperliquid,
-            client_order_id: statuses
-                .first()
-                .map(|s| format!("{s:?}"))
-                .unwrap_or_else(|| "hyperliquid:ok".to_string()),
+            client_order_id: format!("{first:?}"),
+            filled_qty_e8,
+            venue_order_id,
         })
     }
 }
