@@ -9,7 +9,11 @@ mod util;
 
 #[cfg(feature = "cex")]
 use api::{BinanceClient, KrakenClient};
-use api::{CoinbaseClient, DydxClient, ExchangePrice, HyperliquidClient};
+#[cfg(feature = "bitget")]
+use api::BitgetClient;
+use api::{CoinbaseClient, ExchangePrice, HyperliquidClient};
+#[cfg(feature = "dydx")]
+use api::DydxClient;
 use tracing::Level;
 use tracing_subscriber;
 
@@ -69,6 +73,16 @@ async fn run(order_book_name: String, args: Args) {
         CoinbaseClient::new(coinbase_tx).listen_btc_usdt().await;
     });
 
+    #[cfg(feature = "bitget")]
+    let bitget_handle = {
+        let bitget_tx = tx.clone();
+        tokio::spawn(async move {
+            BitgetClient::new(bitget_tx).listen_btc_usdt().await;
+        })
+    };
+    #[cfg(not(feature = "bitget"))]
+    let bitget_handle = tokio::spawn(async { std::future::pending::<()>().await });
+
     let hyperliquid_tx = tx.clone();
     let hyperliquid_network = args.hyperliquid_network.clone();
     let hyperliquid_handle = tokio::spawn(async move {
@@ -77,13 +91,18 @@ async fn run(order_book_name: String, args: Args) {
             .await;
     });
 
-    let dydx_tx = tx.clone();
-    let dydx_network = args.dydx_network.clone();
-    let dydx_handle = tokio::spawn(async move {
-        DydxClient::new(dydx_tx, dydx_network)
-            .listen_btc_usdt()
-            .await;
-    });
+    #[cfg(feature = "dydx")]
+    let dydx_handle = {
+        let dydx_tx = tx.clone();
+        let dydx_network = args.dydx_network.clone();
+        tokio::spawn(async move {
+            DydxClient::new(dydx_tx, dydx_network)
+                .listen_btc_usdt()
+                .await;
+        })
+    };
+    #[cfg(not(feature = "dydx"))]
+    let dydx_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     let (tx_purchase, rx_purchase) = tokio::sync::mpsc::channel(50);
 
@@ -143,6 +162,9 @@ async fn run(order_book_name: String, args: Args) {
         } */
         _ = hyperliquid_handle => {
             // info!("Hyperliquid task ended");
+        }
+        _ = bitget_handle => {
+            // info!("Bitget task ended");
         }
         _ = dydx_handle => {
             // info!("dYdX task ended");

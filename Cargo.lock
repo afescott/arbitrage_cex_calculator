@@ -4585,6 +4585,7 @@ name = "security_flamegraph_lowlatency"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "crossbeam-channel",
  "crossbeam-deque",

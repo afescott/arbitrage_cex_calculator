@@ -38,6 +38,7 @@ pub enum Exchange {
     Kraken,
     Hyperliquid,
     Dydx,
+    Bitget,
 }
 
 /// Represents the best price level with both price and quantity.

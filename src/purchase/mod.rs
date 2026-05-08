@@ -5,6 +5,9 @@
 
 #[cfg(feature = "cex")]
 mod binance;
+#[cfg(feature = "bitget")]
+mod bitget;
+#[cfg(feature = "dydx")]
 mod dydx;
 mod hl;
 
@@ -100,6 +103,9 @@ pub struct ExecutorContext {
     hyperliquid: Option<hl::HyperliquidExecutor>,
     #[cfg(feature = "cex")]
     binance: Option<binance::BinanceFuturesExecutor>,
+    #[cfg(feature = "bitget")]
+    bitget: Option<bitget::BitgetExecutor>,
+    #[cfg(feature = "dydx")]
     dydx: Option<dydx::DydxExecutor>,
 }
 
@@ -122,8 +128,18 @@ impl ExecutorContext {
             (Some(k), Some(s)) => Some(binance::BinanceFuturesExecutor::new(k, s)),
             _ => None,
         };
+        #[cfg(feature = "bitget")]
+        let bitget = match (
+            args.bitget_api_key.clone(),
+            args.bitget_api_secret.clone(),
+            args.bitget_passphrase.clone(),
+        ) {
+            (Some(k), Some(s), Some(p)) => Some(bitget::BitgetExecutor::new(k, s, p)),
+            _ => None,
+        };
         // For relay-based execution, the Rust binary does NOT need the signing material.
         // We still create a Dydx executor if either a local key OR a relay URL is provided.
+        #[cfg(feature = "dydx")]
         let dydx = match (args.dydx_private_key.clone(), args.dydx_order_relay_url.clone()) {
             (Some(pk), relay) => Some(dydx::DydxExecutor::new(Some(pk), relay)),
             (None, Some(relay)) => Some(dydx::DydxExecutor::new(None, Some(relay))),
@@ -133,6 +149,9 @@ impl ExecutorContext {
             hyperliquid,
             #[cfg(feature = "cex")]
             binance,
+            #[cfg(feature = "bitget")]
+            bitget,
+            #[cfg(feature = "dydx")]
             dydx,
         }
     }
@@ -152,7 +171,14 @@ impl ExecutorContext {
     }
 
     pub fn has_dydx(&self) -> bool {
-        self.dydx.is_some()
+        #[cfg(feature = "dydx")]
+        {
+            self.dydx.is_some()
+        }
+        #[cfg(not(feature = "dydx"))]
+        {
+            false
+        }
     }
 }
 
@@ -181,6 +207,21 @@ pub async fn submit_limit_order(
         }
         #[cfg(not(feature = "cex"))]
         Exchange::Binance => Err(ExecError::UnsupportedExchange(Exchange::Binance)),
+        #[cfg(feature = "bitget")]
+        Exchange::Bitget => {
+            let ex = order
+                .bitget
+                .as_ref()
+                .ok_or(ExecError::MissingCredentials(
+                    "--bitget-api-key/--bitget-api-secret/--bitget-passphrase",
+                ))?;
+            let built = ex.build_payload(&req)?;
+            let signed = ex.sign(built)?;
+            ex.send(signed).await
+        }
+        #[cfg(not(feature = "bitget"))]
+        Exchange::Bitget => Err(ExecError::UnsupportedExchange(Exchange::Bitget)),
+        #[cfg(feature = "dydx")]
         Exchange::Dydx => {
             let ex = order
                 .dydx
@@ -190,6 +231,8 @@ pub async fn submit_limit_order(
             let signed = ex.sign(built)?;
             ex.send(signed).await
         }
+        #[cfg(not(feature = "dydx"))]
+        Exchange::Dydx => Err(ExecError::UnsupportedExchange(Exchange::Dydx)),
         other => Err(ExecError::UnsupportedExchange(other)),
     }
 }
@@ -265,6 +308,7 @@ impl PurchaseManager {
             return Ok(());
         }
         hl::HyperliquidPurchase::preflight(&self.order)?;
+        #[cfg(feature = "dydx")]
         dydx::DydxPurchase::preflight(&self.order)?;
         Ok(())
     }
@@ -279,6 +323,17 @@ impl PurchaseManager {
 
         while let Some(route) = self.rx.recv().await {
             if !Self::sizing_ok(self.notional_usd_per_leg, &self.perp_symbol) {
+                continue;
+            }
+
+            // Safety: only allow Hyperliquid as the first (buy) leg, because it's the only venue
+            // we currently parse immediate IOC fills for. This prevents stacking unknown exposure
+            // when the first leg is a venue with unknown fill status (e.g. dYdX relay).
+            if route.buy_exchange != Exchange::Hyperliquid {
+                println!(
+                    "Skipping route: require Hyperliquid as first leg (buy_exchange={:?})",
+                    route.buy_exchange
+                );
                 continue;
             }
 
@@ -306,7 +361,11 @@ impl PurchaseManager {
             }
 
             if self.execute_live {
-                self.submit_cross_legs(&route, qty_sats).await;
+                if let Err(msg) = self.submit_cross_legs(&route, qty_sats).await {
+                    println!("{msg}");
+                    // Hard-stop to prevent repeated HL fills stacking unhedged.
+                    break;
+                }
             } else {
                 println!(
                     "DRY RUN (--execute-live=0): would LONG on {:?} and SHORT on {:?} (qty_e8={}, notional_usd_per_leg={})",
@@ -328,7 +387,11 @@ impl PurchaseManager {
         true
     }
 
-    async fn submit_cross_legs(&self, route: &BuyExchangeSellExchange, qty_sats: u64) {
+    async fn submit_cross_legs(
+        &self,
+        route: &BuyExchangeSellExchange,
+        qty_sats: u64,
+    ) -> Result<(), String> {
         let sym = self.perp_symbol.clone();
         // IOC-style limit orders: submit the first leg; only attempt the second if the first
         // submission succeeded. (This does NOT guarantee fills; it guarantees we don't fire the
@@ -383,7 +446,7 @@ impl PurchaseManager {
                 println!("Skipping second leg: first leg failed at submit-time.");
                 #[cfg(feature = "csv")]
                 self.emit_route_outcome(route, qty_sats, false, false).await;
-                return;
+                return Ok(());
             }
         };
 
@@ -396,7 +459,7 @@ impl PurchaseManager {
                 println!("Skipping second leg: first leg submit OK but filled_qty_e8=0 (no fill).");
                 #[cfg(feature = "csv")]
                 self.emit_route_outcome(route, qty_sats, true, false).await;
-                return;
+                return Ok(());
             }
             Some(q) => q,
             None => {
@@ -410,7 +473,7 @@ impl PurchaseManager {
                     println!("Skipping second leg: first leg submit OK but fill is unknown (no fill tracking for this venue yet).");
                     #[cfg(feature = "csv")]
                     self.emit_route_outcome(route, qty_sats, true, false).await;
-                    return;
+                    return Ok(());
                 }
             }
         };
@@ -468,6 +531,15 @@ impl PurchaseManager {
         #[cfg(feature = "csv")]
         self.emit_route_outcome(route, filled_qty, true, res_second.is_ok())
             .await;
+
+        // If we got a confirmed HL fill but the hedge leg failed to submit, halt to avoid stacking.
+        if filled_qty > 0 && res_second.is_err() {
+            return Err(format!(
+                "HALT: Hyperliquid first leg filled_qty_e8={} but hedge leg submit failed; refusing to place further orders.",
+                filled_qty
+            ));
+        }
+        Ok(())
     }
 }
 

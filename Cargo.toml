@@ -9,6 +9,10 @@ default = []
 cex = ["dep:hmac", "dep:sha2", "dep:hex"]
 ## Optional CSV metrics writer (order attempts + run summary).
 csv = []
+## dYdX v4 indexer WS market data + relay execution.
+dydx = []
+## Bitget perps (mix) WS market data + HMAC REST execution.
+bitget = ["dep:hmac", "dep:sha2", "dep:hex", "dep:base64"]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -25,6 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 hmac = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 hex = { version = "0.4", optional = true }
+base64 = { version = "0.22", optional = true }
 # Hyperliquid signing + trading (EIP-712)
 hypersdk = "0.2.9"
 rust_decimal = "1.39"

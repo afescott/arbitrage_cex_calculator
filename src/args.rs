@@ -85,11 +85,14 @@ pub struct Args {
     pub binance_api_secret: Option<String>,
 
     // dYdX v4 (order execution / signing; market data uses public indexer WS)
+    #[cfg(feature = "dydx")]
     pub dydx_private_key: Option<String>,
     /// If set, `DydxExecutor::send` POSTs the planning JSON here (signing service / composite client).
+    #[cfg(feature = "dydx")]
     pub dydx_order_relay_url: Option<String>,
     /// dYdX network selection for indexer WebSocket market data.
     /// If unset: defaults to `testnet` when `--execute-live 0`, otherwise `mainnet`.
+    #[cfg(feature = "dydx")]
     pub dydx_network: Net,
 
     pub bias: Bias,
@@ -98,6 +101,14 @@ pub struct Args {
 
     /// 0 = no live orders (dry run); 1 = submit real orders.
     pub execute_live: bool,
+
+    /// Bitget perps (mix) API credentials (feature = "bitget").
+    #[cfg(feature = "bitget")]
+    pub bitget_api_key: Option<String>,
+    #[cfg(feature = "bitget")]
+    pub bitget_api_secret: Option<String>,
+    #[cfg(feature = "bitget")]
+    pub bitget_passphrase: Option<String>,
 
     /// Optional CSV metrics output path (feature = "csv").
     #[cfg(feature = "csv")]
@@ -123,6 +134,7 @@ impl Args {
     /// - `--perp-symbol <SYM>` (e.g. `SOL`; defaults from `--pair` before `/` or `BTC`)
     /// - `--notional-usd-per-leg <USD>` (integer; default: `budget/2`, capped by leverage field below)
     /// - `--max-margin-leverage <N>` (integer ≥ 1, default `3`) caps default/explicit notional per leg
+    /// - With feature `bitget`: `--bitget-api-key/--bitget-api-secret/--bitget-passphrase` (or env `BITGET_API_KEY` etc.)
     /// - With feature `csv`: `--csv-path <PATH>` or `CSV_PATH=<PATH>` to enable metrics output
     ///
     /// Unknown flags are ignored to keep this lightweight.
@@ -251,6 +263,7 @@ impl Args {
                 None => 2,
             };
 
+        #[cfg(feature = "dydx")]
         let dydx_network = cli_or_env(&map, "--dydx-network", "DYDX_NETWORK")
             .as_deref()
             .map(|s| Net::parse_flag("--dydx-network", s))
@@ -264,6 +277,13 @@ impl Args {
 
         #[cfg(feature = "csv")]
         let csv_path = cli_or_env(&map, "--csv-path", "CSV_PATH");
+
+        #[cfg(feature = "bitget")]
+        let bitget_api_key = cli_or_env(&map, "--bitget-api-key", "BITGET_API_KEY");
+        #[cfg(feature = "bitget")]
+        let bitget_api_secret = cli_or_env(&map, "--bitget-api-secret", "BITGET_API_SECRET");
+        #[cfg(feature = "bitget")]
+        let bitget_passphrase = cli_or_env(&map, "--bitget-passphrase", "BITGET_PASSPHRASE");
 
         Ok(Self {
             pair,
@@ -282,14 +302,23 @@ impl Args {
             binance_api_key: map.get("--binance-api-key").cloned(),
             #[cfg(feature = "cex")]
             binance_api_secret: map.get("--binance-api-secret").cloned(),
+            #[cfg(feature = "dydx")]
             dydx_private_key: cli_or_env(&map, "--dydx-private-key", "DYDX_PRIVATE_KEY"),
+            #[cfg(feature = "dydx")]
             dydx_order_relay_url: cli_or_env(&map, "--dydx-order-relay-url", "DYDX_ORDER_RELAY_URL"),
+            #[cfg(feature = "dydx")]
             dydx_network,
             bias,
             budget,
             execute_live,
             #[cfg(feature = "csv")]
             csv_path,
+            #[cfg(feature = "bitget")]
+            bitget_api_key,
+            #[cfg(feature = "bitget")]
+            bitget_api_secret,
+            #[cfg(feature = "bitget")]
+            bitget_passphrase,
         })
     }
 

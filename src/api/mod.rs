@@ -3,7 +3,10 @@
 
 #[cfg(feature = "cex")]
 pub mod binance;
+#[cfg(feature = "bitget")]
+pub mod bitget;
 pub mod coinbase;
+#[cfg(feature = "dydx")]
 pub mod dydx;
 pub mod hyperliquid;
 #[cfg(feature = "cex")]
@@ -11,7 +14,10 @@ pub mod kraken;
 
 #[cfg(feature = "cex")]
 pub use binance::BinanceClient;
+#[cfg(feature = "bitget")]
+pub use bitget::BitgetClient;
 pub use coinbase::CoinbaseClient;
+#[cfg(feature = "dydx")]
 pub use dydx::DydxClient;
 pub use hyperliquid::HyperliquidClient;
 #[cfg(feature = "cex")]
@@ -31,6 +37,7 @@ pub enum Exchange {
     Coinbase,
     Hyperliquid,
     Dydx,
+    Bitget,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,10 +78,18 @@ pub enum ExchangePrice {
         received_at: Instant,
         side: Side, // Buy or Sell side (perpetual futures)
     },
+    #[cfg(feature = "dydx")]
     Dydx {
         price: u64,
         quantity: u64,
         exchange_timestamp: Option<u64>, // indexer message_id as logical sequence
+        received_at: Instant,
+        side: Side,
+    },
+    Bitget {
+        price: u64,
+        quantity: u64,
+        exchange_timestamp: Option<u64>,
         received_at: Instant,
         side: Side,
     },
@@ -87,7 +102,9 @@ impl ExchangePrice {
             ExchangePrice::Kraken { price, .. } => *price,
             ExchangePrice::Coinbase { price, .. } => *price,
             ExchangePrice::Hyperliquid { price, .. } => *price,
+            #[cfg(feature = "dydx")]
             ExchangePrice::Dydx { price, .. } => *price,
+            ExchangePrice::Bitget { price, .. } => *price,
         }
     }
 
@@ -97,7 +114,9 @@ impl ExchangePrice {
             ExchangePrice::Kraken { quantity, .. } => *quantity,
             ExchangePrice::Coinbase { quantity, .. } => *quantity,
             ExchangePrice::Hyperliquid { quantity, .. } => *quantity,
+            #[cfg(feature = "dydx")]
             ExchangePrice::Dydx { quantity, .. } => *quantity,
+            ExchangePrice::Bitget { quantity, .. } => *quantity,
         }
     }
 
@@ -107,7 +126,9 @@ impl ExchangePrice {
             ExchangePrice::Kraken { received_at, .. } => *received_at,
             ExchangePrice::Coinbase { received_at, .. } => *received_at,
             ExchangePrice::Hyperliquid { received_at, .. } => *received_at,
+            #[cfg(feature = "dydx")]
             ExchangePrice::Dydx { received_at, .. } => *received_at,
+            ExchangePrice::Bitget { received_at, .. } => *received_at,
         }
     }
 
@@ -125,7 +146,11 @@ impl ExchangePrice {
             ExchangePrice::Hyperliquid {
                 exchange_timestamp, ..
             } => *exchange_timestamp,
+            #[cfg(feature = "dydx")]
             ExchangePrice::Dydx {
+                exchange_timestamp, ..
+            } => *exchange_timestamp,
+            ExchangePrice::Bitget {
                 exchange_timestamp, ..
             } => *exchange_timestamp,
         }
@@ -137,7 +162,9 @@ impl ExchangePrice {
             ExchangePrice::Kraken { .. } => Exchange::Kraken,
             ExchangePrice::Coinbase { .. } => Exchange::Coinbase,
             ExchangePrice::Hyperliquid { .. } => Exchange::Hyperliquid,
+            #[cfg(feature = "dydx")]
             ExchangePrice::Dydx { .. } => Exchange::Dydx,
+            ExchangePrice::Bitget { .. } => Exchange::Bitget,
         }
     }
 
@@ -147,7 +174,9 @@ impl ExchangePrice {
             ExchangePrice::Kraken { side, .. } => *side,
             ExchangePrice::Coinbase { side, .. } => *side,
             ExchangePrice::Hyperliquid { side, .. } => *side,
+            #[cfg(feature = "dydx")]
             ExchangePrice::Dydx { side, .. } => *side,
+            ExchangePrice::Bitget { side, .. } => *side,
         }
     }
 
@@ -215,6 +244,7 @@ impl std::fmt::Display for ExchangePrice {
                     )
                 }
             }
+            #[cfg(feature = "dydx")]
             ExchangePrice::Dydx { price, .. } => {
                 if let Some(ts) = exchange_ts {
                     write!(
@@ -224,6 +254,17 @@ impl std::fmt::Display for ExchangePrice {
                     )
                 } else {
                     write!(f, "dYdX: {} cents (latency: {}μs)", price, latency_us)
+                }
+            }
+            ExchangePrice::Bitget { price, .. } => {
+                if let Some(ts) = exchange_ts {
+                    write!(
+                        f,
+                        "Bitget: {} cents (exchange_ts: {}ms, latency: {}μs)",
+                        price, ts, latency_us
+                    )
+                } else {
+                    write!(f, "Bitget: {} cents (latency: {}μs)", price, latency_us)
                 }
             }
         }
