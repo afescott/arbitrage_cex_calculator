@@ -56,7 +56,7 @@ async fn run(order_book_name: String, args: Args) {
         })
     };
     #[cfg(not(feature = "cex"))]
-    let binance_handle = tokio::spawn(async { std::future::pending::<()>().await });
+    let _binance_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     #[cfg(feature = "cex")]
     let kraken_handle = {
@@ -66,15 +66,15 @@ async fn run(order_book_name: String, args: Args) {
         })
     };
     #[cfg(not(feature = "cex"))]
-    let kraken_handle = tokio::spawn(async { std::future::pending::<()>().await });
+    let _kraken_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     let coinbase_tx = tx.clone();
-    let coinbase_handle = tokio::spawn(async move {
+    let _coinbase_handle = tokio::spawn(async move {
         CoinbaseClient::new(coinbase_tx).listen_btc_usdt().await;
     });
 
     #[cfg(feature = "bitget")]
-    let bitget_handle = {
+    let _bitget_handle = {
         let bitget_tx = tx.clone();
         tokio::spawn(async move {
             BitgetClient::new(bitget_tx).listen_btc_usdt().await;
@@ -85,7 +85,7 @@ async fn run(order_book_name: String, args: Args) {
 
     let hyperliquid_tx = tx.clone();
     let hyperliquid_network = args.hyperliquid_network.clone();
-    let hyperliquid_handle = tokio::spawn(async move {
+    let _hyperliquid_handle = tokio::spawn(async move {
         HyperliquidClient::new(hyperliquid_tx, hyperliquid_network)
             .listen_btc_usdt()
             .await;
@@ -102,7 +102,7 @@ async fn run(order_book_name: String, args: Args) {
         })
     };
     #[cfg(not(feature = "dydx"))]
-    let dydx_handle = tokio::spawn(async { std::future::pending::<()>().await });
+    let _dydx_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     let (tx_purchase, rx_purchase) = tokio::sync::mpsc::channel(50);
 
@@ -146,34 +146,18 @@ async fn run(order_book_name: String, args: Args) {
         pm.run_purchase_simulation().await;
     });
 
-    // Wait for all tasks (they run indefinitely)
+    // Do not join on individual market-data tasks: if a feed task ever exits, the process should
+    // keep running (feeds use reconnect loops). Shutdown is Ctrl-C, aggregator exit, or purchase
+    // loop finishing (e.g. channel closed).
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             eprintln!("ctrl-c: shutting down");
         }
-        /* _ = binance_handle => {
-            // info!("Binance task ended");
-        }
-        _ = kraken_handle => {
-            // info!("Kraken task ended");
-        }
-        _ = coinbase_handle => {
-            // info!("Coinbase task ended");
-        } */
-        _ = hyperliquid_handle => {
-            // info!("Hyperliquid task ended");
-        }
-        _ = bitget_handle => {
-            // info!("Bitget task ended");
-        }
-        _ = dydx_handle => {
-            // info!("dYdX task ended");
-        }
         _ = aggregator_handle => {
-            // info!("Aggregator task ended");
+            eprintln!("aggregator task ended");
         }
         _ = purchase_handle => {
-            // info!("Purchase manager task ended");
+            eprintln!("purchase task ended");
         }
     }
 

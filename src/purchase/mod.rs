@@ -326,17 +326,6 @@ impl PurchaseManager {
                 continue;
             }
 
-            // Safety: only allow Hyperliquid as the first (buy) leg, because it's the only venue
-            // we currently parse immediate IOC fills for. This prevents stacking unknown exposure
-            // when the first leg is a venue with unknown fill status (e.g. dYdX relay).
-            if route.buy_exchange != Exchange::Hyperliquid {
-                println!(
-                    "Skipping route: require Hyperliquid as first leg (buy_exchange={:?})",
-                    route.buy_exchange
-                );
-                continue;
-            }
-
             let Some(qty_sats) =
                 sizing::qty_base_e8_from_notional(route.buy_price, self.notional_usd_per_leg)
             else {
@@ -363,7 +352,7 @@ impl PurchaseManager {
             if self.execute_live {
                 if let Err(msg) = self.submit_cross_legs(&route, qty_sats).await {
                     println!("{msg}");
-                    // Hard-stop to prevent repeated HL fills stacking unhedged.
+                    // Hard-stop to prevent repeated first-leg fills stacking unhedged.
                     break;
                 }
             } else {
@@ -376,14 +365,9 @@ impl PurchaseManager {
     }
 
     fn sizing_ok(notional_usd_per_leg: u64, perp_symbol: &str) -> bool {
-        let min_n = sizing::conservative_min_notional_usd(perp_symbol);
-        if notional_usd_per_leg < min_n {
-            eprintln!(
-                "Skipping route: notional_usd_per_leg {} < conservative min {} (check venue min notional)",
-                notional_usd_per_leg, min_n
-            );
-            return false;
-        }
+        let _ = (notional_usd_per_leg, perp_symbol);
+        // No global min-notional gate here. Venue-specific checks still apply at execution time
+        // (e.g., Hyperliquid enforces a ~$10 min notional and the executor already bumps size).
         true
     }
 
@@ -532,11 +516,11 @@ impl PurchaseManager {
         self.emit_route_outcome(route, filled_qty, true, res_second.is_ok())
             .await;
 
-        // If we got a confirmed HL fill but the hedge leg failed to submit, halt to avoid stacking.
+        // Confirmed first-leg fill but hedge failed to submit: halt to avoid stacking exposure.
         if filled_qty > 0 && res_second.is_err() {
             return Err(format!(
-                "HALT: Hyperliquid first leg filled_qty_e8={} but hedge leg submit failed; refusing to place further orders.",
-                filled_qty
+                "HALT: first leg filled_qty_e8={} on {:?} but hedge leg submit failed; refusing to place further orders.",
+                filled_qty, route.buy_exchange
             ));
         }
         Ok(())

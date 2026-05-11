@@ -3,7 +3,7 @@ use crate::{
     util::parse_price_cents,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::args::Net;
@@ -19,66 +19,54 @@ impl HyperliquidClient {
     }
 
     pub async fn listen_btc_usdt(&self) {
-        // info!("[Hyperliquid] Connecting to BTC perpetual futures price feed...");
-
         let url = match self.network {
             Net::Testnet => "wss://api.hyperliquid-testnet.xyz/ws",
             Net::Mainnet => "wss://api.hyperliquid.xyz/ws",
         };
-        match connect_async(url).await {
-            Ok((mut ws_stream, _)) => {
-                // info!("[Hyperliquid] Connected successfully");
-
-                // Subscribe to BTC perpetual orderbook (l2Book)
-                // Hyperliquid uses "BTC" as the coin name for Bitcoin perpetual
-                // Format: {"method": "subscribe", "subscription": {"type": "l2Book", "coin": "BTC"}}
-                let subscribe_msg = serde_json::json!({
-                    "method": "subscribe",
-                    "subscription": {
-                        "type": "l2Book",
-                        "coin": "BTC"
-                    }
-                });
-
-                // Send subscription message
-                if let Err(e) = ws_stream
-                    .send(Message::Text(subscribe_msg.to_string()))
-                    .await
-                {
-                    // error!("[Hyperliquid] Failed to send subscription: {}", e);
-                    return;
-                }
-
-                let (_write, mut read) = ws_stream.split();
-
-                while let Some(msg) = read.next().await {
-                    match msg {
-                        Ok(Message::Text(text)) => {
-                            // Capture timestamp immediately when message received
-                            let received_at = Instant::now();
-                            if let Err(e) = self.handle_message(&text, received_at).await {
-                                // warn!("[Hyperliquid] Error handling message: {}", e);
-                            }
-                        }
-                        Ok(Message::Ping(data)) => {
-                            // info!("[Hyperliquid] Received ping");
-                        }
-                        Ok(Message::Close(_)) => {
-                            // warn!("[Hyperliquid] Connection closed");
-                            break;
-                        }
-                        Err(e) => {
-                            // error!("[Hyperliquid] WebSocket error: {}", e);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
+        loop {
+            match self.run_one_connection(url).await {
+                Ok(()) => eprintln!("Hyperliquid WS: connection ended, reconnecting…"),
+                Err(e) => eprintln!("Hyperliquid WS: {e}, reconnecting…"),
             }
-            Err(e) => {
-                // error!("[Hyperliquid] Failed to connect: {}", e);
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn run_one_connection(&self, url: &'static str) -> Result<(), &'static str> {
+        let (mut ws_stream, _) = connect_async(url)
+            .await
+            .map_err(|_| "connect failed")?;
+
+        let subscribe_msg = serde_json::json!({
+            "method": "subscribe",
+            "subscription": {
+                "type": "l2Book",
+                "coin": "BTC"
+            }
+        });
+
+        ws_stream
+            .send(Message::Text(subscribe_msg.to_string()))
+            .await
+            .map_err(|_| "subscribe send failed")?;
+
+        let (mut write, mut read) = ws_stream.split();
+
+        while let Some(msg) = read.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    let received_at = Instant::now();
+                    let _ = self.handle_message(&text, received_at).await;
+                }
+                Ok(Message::Ping(data)) => {
+                    let _ = write.send(Message::Pong(data)).await;
+                }
+                Ok(Message::Close(_)) => return Ok(()),
+                Err(_) => return Err("websocket error"),
+                _ => {}
             }
         }
+        Err("read stream ended")
     }
 
     async fn handle_message(

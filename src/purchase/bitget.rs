@@ -7,6 +7,7 @@ use base64::Engine;
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use reqwest::header::CONTENT_TYPE;
+use serde_json::Value;
 use sha2::Sha256;
 
 use super::{BuiltPayload, ExecError, LimitOrderRequest, OrderAck, OrderExecutor, OrderSide, SignedPayload};
@@ -58,7 +59,13 @@ impl OrderExecutor for BitgetExecutor {
             OrderSide::Sell => "sell",
         };
         let force = if req.post_only { "post_only" } else { "ioc" };
-        let reduce_only = if req.reduce_only { "YES" } else { "NO" };
+        // Bitget position-mode nuance:
+        // - In hedge-mode, `tradeSide` is required ("open"/"close") and `reduceOnly` is not used.
+        // - In one-way-mode, Bitget ignores `tradeSide` and uses `reduceOnly` for close-only behavior.
+        //
+        // We always send `tradeSide` and omit `reduceOnly` to be compatible with hedge-mode accounts.
+        // (One-way-mode will ignore `tradeSide`.)
+        let trade_side = if req.reduce_only { "close" } else { "open" };
 
         let body = serde_json::json!({
             "symbol": "BTCUSDT",
@@ -68,9 +75,9 @@ impl OrderExecutor for BitgetExecutor {
             "size": size,
             "price": price,
             "side": side,
+            "tradeSide": trade_side,
             "orderType": "limit",
             "force": force,
-            "reduceOnly": reduce_only,
             "clientOid": format!("bot-{}", Utc::now().timestamp_millis()),
         })
         .to_string();
@@ -97,6 +104,19 @@ impl OrderExecutor for BitgetExecutor {
         let request_path = signed.endpoint;
         let sign = self.sign_request(ts_ms, method, request_path, &signed.body);
 
+        // Debug: show the planned order (no secrets).
+        if let Ok(v) = serde_json::from_str::<Value>(&signed.body) {
+            let side = v.get("side").and_then(|x| x.as_str()).unwrap_or("?");
+            let size = v.get("size").and_then(|x| x.as_str()).unwrap_or("?");
+            let price = v.get("price").and_then(|x| x.as_str()).unwrap_or("?");
+            let force = v.get("force").and_then(|x| x.as_str()).unwrap_or("?");
+            let trade_side = v.get("tradeSide").and_then(|x| x.as_str()).unwrap_or("?");
+            eprintln!(
+                "bitget place-order: side={} tradeSide={} size={} price={} force={}",
+                side, trade_side, size, price, force
+            );
+        }
+
         let url = format!("{}{}", self.base_url, request_path);
         let resp = self
             .http
@@ -116,15 +136,45 @@ impl OrderExecutor for BitgetExecutor {
             .text()
             .await
             .map_err(|e| ExecError::SendFailed(format!("bitget body: {e}")))?;
+
+        // Debug: show response code/msg/orderId if available.
+        if let Ok(v) = serde_json::from_str::<Value>(&text) {
+            let code = v.get("code").and_then(|x| x.as_str()).unwrap_or("");
+            let msg = v.get("msg").and_then(|x| x.as_str()).unwrap_or("");
+            let order_id = v
+                .get("data")
+                .and_then(|d| d.get("orderId").or(d.get("order_id")))
+                .and_then(|x| x.as_str())
+                .unwrap_or("");
+            eprintln!("bitget response: http={} code={} msg={} orderId={}", status, code, msg, order_id);
+        } else {
+            eprintln!(
+                "bitget response: http={} body_snip={}",
+                status,
+                text.chars().take(300).collect::<String>()
+            );
+        }
+
         if !status.is_success() {
             return Err(ExecError::SendFailed(format!(
                 "bitget HTTP {status}: {}",
                 text.chars().take(800).collect::<String>()
             )));
         }
+
+        // Prefer returning Bitget orderId if present.
+        let client_order_id = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| {
+                v.get("data")
+                    .and_then(|d| d.get("orderId").or(d.get("clientOid")))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| text.chars().take(200).collect());
         Ok(OrderAck {
             exchange: Exchange::Bitget,
-            client_order_id: text.chars().take(200).collect(),
+            client_order_id,
             filled_qty_e8: None,
             venue_order_id: None,
         })
