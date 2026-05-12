@@ -32,7 +32,7 @@ pub(crate) fn qty_sats_to_decimal_string(qty_sats: u64) -> String {
     s
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrderSide {
     Buy,
     Sell,
@@ -49,6 +49,8 @@ pub struct LimitOrderRequest {
     pub qty_sats: u64,
     pub post_only: bool,
     pub reduce_only: bool,
+    /// Market order (Bitget: `orderType=market`; price ignored).
+    pub market: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +182,16 @@ impl ExecutorContext {
             false
         }
     }
+
+    #[cfg(feature = "bitget")]
+    pub fn has_bitget(&self) -> bool {
+        self.bitget.is_some()
+    }
+
+    #[cfg(not(feature = "bitget"))]
+    pub fn has_bitget(&self) -> bool {
+        false
+    }
 }
 
 pub async fn submit_limit_order(
@@ -242,12 +254,49 @@ pub(crate) trait PurchaseVenueModule {
     fn preflight(ctx: &ExecutorContext) -> Result<(), &'static str>;
 }
 
+#[cfg(feature = "bitget")]
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct BitgetPositionLedger {
+    pub long_qty_e8: u64,
+    pub short_qty_e8: u64,
+}
+
+#[cfg(feature = "bitget")]
+impl BitgetPositionLedger {
+    pub fn has_long(&self) -> bool {
+        self.long_qty_e8 > 0
+    }
+
+    pub fn has_short(&self) -> bool {
+        self.short_qty_e8 > 0
+    }
+
+    pub fn apply_fill(&mut self, side: OrderSide, closing: bool, filled_e8: u64) {
+        if filled_e8 == 0 {
+            return;
+        }
+        if closing {
+            match side {
+                OrderSide::Buy => self.short_qty_e8 = self.short_qty_e8.saturating_sub(filled_e8),
+                OrderSide::Sell => self.long_qty_e8 = self.long_qty_e8.saturating_sub(filled_e8),
+            }
+        } else {
+            match side {
+                OrderSide::Buy => self.long_qty_e8 = self.long_qty_e8.saturating_add(filled_e8),
+                OrderSide::Sell => self.short_qty_e8 = self.short_qty_e8.saturating_add(filled_e8),
+            }
+        }
+    }
+}
+
 pub struct PurchaseManager {
     rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>,
     order: ExecutorContext,
     perp_symbol: String,
     notional_usd_per_leg: u64,
     execute_live: bool,
+    #[cfg(feature = "bitget")]
+    bitget_ledger: BitgetPositionLedger,
     #[cfg(feature = "csv")]
     csv_tx: Option<tokio::sync::mpsc::Sender<CsvEvent>>,
 }
@@ -276,6 +325,8 @@ impl PurchaseManager {
             perp_symbol,
             notional_usd_per_leg,
             execute_live,
+            #[cfg(feature = "bitget")]
+            bitget_ledger: BitgetPositionLedger::default(),
             csv_tx,
         }
     }
@@ -299,6 +350,8 @@ impl PurchaseManager {
             perp_symbol,
             notional_usd_per_leg,
             execute_live,
+            #[cfg(feature = "bitget")]
+            bitget_ledger: BitgetPositionLedger::default(),
         }
     }
 
@@ -315,53 +368,200 @@ impl PurchaseManager {
 
     /// Minimal perps execution wiring (API spec focus).
     /// For each route: go long on `buy_exchange`, short on `sell_exchange`.
-    pub async fn run_purchase_simulation(&mut self) {
+    pub async fn run_purchase_simulation(
+        &mut self,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
         if let Err(msg) = self.run_venue_preflight() {
             eprintln!("{msg}");
             return;
         }
 
-        while let Some(route) = self.rx.recv().await {
-            if !Self::sizing_ok(self.notional_usd_per_leg, &self.perp_symbol) {
-                continue;
-            }
+        let mut live_trading_enabled = true;
 
-            let Some(qty_sats) =
-                sizing::qty_base_e8_from_notional(route.buy_price, self.notional_usd_per_leg)
-            else {
-                eprintln!(
-                    "Skipping route: could not size qty (buy_price_cents={}, notional={})",
-                    route.buy_price, self.notional_usd_per_leg
-                );
-                continue;
-            };
-
-            println!(
-                "Buying on {:?} at {} cents, selling on {:?} at {:?} cents",
-                route.buy_exchange, route.buy_price, route.sell_exchange, route.sell_price
-            );
-
-            if hl::HyperliquidPurchase::route_hits_unsupported_kraken_legs(
-                route.buy_exchange,
-                route.sell_exchange,
-            ) {
-                println!("Kraken is not supported right now for the limit orders");
-                continue;
-            }
-
-            if self.execute_live {
-                if let Err(msg) = self.submit_cross_legs(&route, qty_sats).await {
-                    println!("{msg}");
-                    // Hard-stop to prevent repeated first-leg fills stacking unhedged.
-                    break;
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_ok() && *shutdown.borrow() {
+                        self.flatten_bitget_positions().await;
+                        return;
+                    }
                 }
-            } else {
-                println!(
-                    "DRY RUN (--execute-live=0): would LONG on {:?} and SHORT on {:?} (qty_e8={}, notional_usd_per_leg={})",
-                    route.buy_exchange, route.sell_exchange, qty_sats, self.notional_usd_per_leg
-                );
+                route = self.rx.recv() => {
+                    let Some(route) = route else {
+                        self.flatten_bitget_positions().await;
+                        return;
+                    };
+                    if !Self::sizing_ok(self.notional_usd_per_leg, &self.perp_symbol) {
+                        continue;
+                    }
+
+                    if self.execute_live && !live_trading_enabled {
+                        continue;
+                    }
+
+                    let Some(qty_sats) =
+                        sizing::qty_base_e8_from_notional(route.buy_price, self.notional_usd_per_leg)
+                    else {
+                        eprintln!(
+                            "Skipping route: could not size qty (buy_price_cents={}, notional={})",
+                            route.buy_price, self.notional_usd_per_leg
+                        );
+                        continue;
+                    };
+
+                    println!(
+                        "Buying on {:?} at {} cents, selling on {:?} at {:?} cents",
+                        route.buy_exchange, route.buy_price, route.sell_exchange, route.sell_price
+                    );
+
+                    if hl::HyperliquidPurchase::route_hits_unsupported_kraken_legs(
+                        route.buy_exchange,
+                        route.sell_exchange,
+                    ) {
+                        println!("Kraken is not supported right now for the limit orders");
+                        continue;
+                    }
+
+                    if self.execute_live {
+                        if let Err(msg) = self.submit_cross_legs(&route, qty_sats).await {
+                            eprintln!("{msg}");
+                            eprintln!(
+                                "Live trading disabled; still draining routes so market-data feeds stay unblocked."
+                            );
+                            live_trading_enabled = false;
+                            continue;
+                        }
+                    } else {
+                        println!(
+                            "DRY RUN (--execute-live=0): would LONG on {:?} and SHORT on {:?} (qty_e8={}, notional_usd_per_leg={})",
+                            route.buy_exchange, route.sell_exchange, qty_sats, self.notional_usd_per_leg
+                        );
+                    }
+                }
             }
         }
+    }
+
+    #[cfg(feature = "bitget")]
+    async fn flatten_bitget_positions(&mut self) {
+        if !self.execute_live || !self.order.has_bitget() {
+            return;
+        }
+        let sym = self.perp_symbol.clone();
+        if self.bitget_ledger.has_short() {
+            let qty = self.bitget_ledger.short_qty_e8;
+            eprintln!("Bitget flatten: market close short qty_e8={qty}");
+            let req = LimitOrderRequest {
+                exchange: Exchange::Bitget,
+                symbol: sym.clone(),
+                side: OrderSide::Buy,
+                price_cents: 0,
+                qty_sats: qty,
+                post_only: false,
+                reduce_only: true,
+                market: true,
+            };
+            if let Ok(ack) = self.submit_bitget_order(req).await {
+                if let Some(filled) = ack.filled_qty_e8 {
+                    self.bitget_ledger.apply_fill(OrderSide::Buy, true, filled);
+                }
+            }
+        }
+        if self.bitget_ledger.has_long() {
+            let qty = self.bitget_ledger.long_qty_e8;
+            eprintln!("Bitget flatten: market close long qty_e8={qty}");
+            let req = LimitOrderRequest {
+                exchange: Exchange::Bitget,
+                symbol: sym,
+                side: OrderSide::Sell,
+                price_cents: 0,
+                qty_sats: qty,
+                post_only: false,
+                reduce_only: true,
+                market: true,
+            };
+            if let Ok(ack) = self.submit_bitget_order(req).await {
+                if let Some(filled) = ack.filled_qty_e8 {
+                    self.bitget_ledger.apply_fill(OrderSide::Sell, true, filled);
+                }
+            }
+        }
+    }
+
+    #[cfg(not(feature = "bitget"))]
+    async fn flatten_bitget_positions(&mut self) {}
+
+    #[cfg(feature = "bitget")]
+    async fn submit_bitget_order(
+        &mut self,
+        req: LimitOrderRequest,
+    ) -> Result<OrderAck, ExecError> {
+        if !req.reduce_only {
+            if req.side == OrderSide::Buy && self.bitget_ledger.has_short() {
+                let qty = self.bitget_ledger.short_qty_e8;
+                eprintln!("Bitget: closing short qty_e8={qty} before open long");
+                let close = LimitOrderRequest {
+                    exchange: Exchange::Bitget,
+                    symbol: req.symbol.clone(),
+                    side: OrderSide::Buy,
+                    price_cents: 0,
+                    qty_sats: qty,
+                    post_only: false,
+                    reduce_only: true,
+                    market: true,
+                };
+                let ack = submit_limit_order(&self.order, close).await?;
+                if let Some(filled) = ack.filled_qty_e8 {
+                    self.bitget_ledger.apply_fill(OrderSide::Buy, true, filled);
+                }
+            } else if req.side == OrderSide::Sell && self.bitget_ledger.has_long() {
+                let qty = self.bitget_ledger.long_qty_e8;
+                eprintln!("Bitget: closing long qty_e8={qty} before open short");
+                let close = LimitOrderRequest {
+                    exchange: Exchange::Bitget,
+                    symbol: req.symbol.clone(),
+                    side: OrderSide::Sell,
+                    price_cents: 0,
+                    qty_sats: qty,
+                    post_only: false,
+                    reduce_only: true,
+                    market: true,
+                };
+                let ack = submit_limit_order(&self.order, close).await?;
+                if let Some(filled) = ack.filled_qty_e8 {
+                    self.bitget_ledger.apply_fill(OrderSide::Sell, true, filled);
+                }
+            }
+        }
+
+        let closing = req.reduce_only;
+        let side = req.side;
+        let ack = submit_limit_order(&self.order, req).await?;
+        if let Some(filled) = ack.filled_qty_e8 {
+            self.bitget_ledger.apply_fill(side, closing, filled);
+        }
+        Ok(ack)
+    }
+
+    #[cfg(feature = "bitget")]
+    async fn submit_order(
+        &mut self,
+        req: LimitOrderRequest,
+    ) -> Result<OrderAck, ExecError> {
+        if req.exchange == Exchange::Bitget && self.execute_live {
+            self.submit_bitget_order(req).await
+        } else {
+            submit_limit_order(&self.order, req).await
+        }
+    }
+
+    #[cfg(not(feature = "bitget"))]
+    async fn submit_order(
+        &mut self,
+        req: LimitOrderRequest,
+    ) -> Result<OrderAck, ExecError> {
+        submit_limit_order(&self.order, req).await
     }
 
     fn sizing_ok(notional_usd_per_leg: u64, perp_symbol: &str) -> bool {
@@ -372,7 +572,7 @@ impl PurchaseManager {
     }
 
     async fn submit_cross_legs(
-        &self,
+        &mut self,
         route: &BuyExchangeSellExchange,
         qty_sats: u64,
     ) -> Result<(), String> {
@@ -388,8 +588,9 @@ impl PurchaseManager {
             qty_sats,
             post_only: false,
             reduce_only: false,
+            market: false,
         };
-        let res_first = submit_limit_order(&self.order, first).await;
+        let res_first = self.submit_order(first).await;
         println!("First leg submit result: {:?}", res_first);
         #[cfg(feature = "csv")]
         match res_first.as_ref() {
@@ -476,8 +677,9 @@ impl PurchaseManager {
             qty_sats: filled_qty,
             post_only: false,
             reduce_only: false,
+            market: false,
         };
-        let res_second = submit_limit_order(&self.order, second).await;
+        let res_second = self.submit_order(second).await;
         println!("Second leg submit result: {:?}", res_second);
         #[cfg(feature = "csv")]
         match res_second.as_ref() {
@@ -516,14 +718,45 @@ impl PurchaseManager {
         self.emit_route_outcome(route, filled_qty, true, res_second.is_ok())
             .await;
 
-        // Confirmed first-leg fill but hedge failed to submit: halt to avoid stacking exposure.
-        if filled_qty > 0 && res_second.is_err() {
-            return Err(format!(
-                "HALT: first leg filled_qty_e8={} on {:?} but hedge leg submit failed; refusing to place further orders.",
-                filled_qty, route.buy_exchange
-            ));
+        if filled_qty > 0 {
+            if let Err(e) = &res_second {
+                return Err(format!(
+                    "HALT: first leg filled_qty_e8={} on {:?} but hedge leg submit failed ({e:?}); refusing further orders.",
+                    filled_qty, route.buy_exchange
+                ));
+            }
+            if let Ok(ack) = &res_second {
+                if let Some(reason) =
+                    Self::hedge_fill_mismatch(filled_qty, route, ack)
+                {
+                    return Err(reason);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Halt when leg1 filled but leg2 did not fully hedge (submit OK but zero/partial/unknown fill).
+    fn hedge_fill_mismatch(
+        leg1_filled: u64,
+        route: &BuyExchangeSellExchange,
+        leg2_ack: &OrderAck,
+    ) -> Option<String> {
+        match leg2_ack.filled_qty_e8 {
+            Some(0) => Some(format!(
+                "HALT: first leg filled_qty_e8={} on {:?}, hedge filled_qty_e8=0 on {:?}; refusing further orders.",
+                leg1_filled, route.buy_exchange, route.sell_exchange
+            )),
+            Some(hedge_filled) if hedge_filled < leg1_filled => Some(format!(
+                "HALT: first leg filled_qty_e8={} on {:?}, hedge filled_qty_e8={} on {:?}; refusing further orders.",
+                leg1_filled, route.buy_exchange, hedge_filled, route.sell_exchange
+            )),
+            None => Some(format!(
+                "HALT: first leg filled_qty_e8={} on {:?}, hedge fill unknown on {:?}; refusing further orders.",
+                leg1_filled, route.buy_exchange, route.sell_exchange
+            )),
+            _ => None,
+        }
     }
 }
 

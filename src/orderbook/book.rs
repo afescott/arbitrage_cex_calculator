@@ -210,10 +210,23 @@ impl OrderBook {
                 sell_exchange: opportunity.sell_exchange,
                 buy_exchange: opportunity.buy_exchange,
             };
-            //TODO: Struct this and use profit bps vs actual profit comparison
-            tx.send(buy_exchange_sell_exchange)
-                .await
-                .unwrap_or_else(|e| eprintln!("Failed to send arbitrage opportunity: {}", e));
+            // Never block the aggregator on a slow purchase loop; drop stale routes instead.
+            match tx.try_send(buy_exchange_sell_exchange) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    static DROPPED: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let n = DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n == 1 || n % 100 == 0 {
+                        eprintln!(
+                            "purchase route channel full; dropped {n} route(s) (purchase loop busy)"
+                        );
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    eprintln!("purchase route channel closed");
+                }
+            }
         }
     }
 

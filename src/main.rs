@@ -138,17 +138,17 @@ async fn run(order_book_name: String, args: Args) {
     #[cfg(feature = "csv")]
     let csv_tx_opt = csv_handle.as_ref().map(|h| h.tx.clone());
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     let purchase_handle = tokio::spawn(async move {
         #[cfg(feature = "csv")]
         let mut pm = PurchaseManager::new(rx_purchase, args, csv_tx_opt);
         #[cfg(not(feature = "csv"))]
         let mut pm = PurchaseManager::new(rx_purchase, args);
-        pm.run_purchase_simulation().await;
+        pm.run_purchase_simulation(shutdown_rx).await;
     });
 
-    // Do not join on individual market-data tasks: if a feed task ever exits, the process should
-    // keep running (feeds use reconnect loops). Shutdown is Ctrl-C, aggregator exit, or purchase
-    // loop finishing (e.g. channel closed).
+    // Shutdown on Ctrl-C or aggregator exit; signal purchase to flatten Bitget before exit.
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             eprintln!("ctrl-c: shutting down");
@@ -156,10 +156,10 @@ async fn run(order_book_name: String, args: Args) {
         _ = aggregator_handle => {
             eprintln!("aggregator task ended");
         }
-        _ = purchase_handle => {
-            eprintln!("purchase task ended");
-        }
     }
+
+    let _ = shutdown_tx.send(true);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), purchase_handle).await;
 
     // Best-effort cleanup on shutdown.
     #[cfg(feature = "csv")]
