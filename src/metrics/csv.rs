@@ -44,6 +44,10 @@ pub struct CsvRouteOutcome {
     pub profit_expect_bps: u64,
     pub first_ok: bool,
     pub second_ok: bool,
+    pub leg1_filled_e8: u64,
+    pub leg2_filled_e8: u64,
+    pub hedge_retry: bool,
+    pub hedge_complete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -73,8 +77,7 @@ pub fn start_csv_writer(path: PathBuf, run_label: String) -> CsvHandle {
         let mut w = BufWriter::new(file);
 
         // Header: stable schema for downstream parsing.
-        // Keep this in sync with the per-row writer below (21 columns).
-        let header = "event_type,ts_ms,run_label,leg,exchange,side,price_cents,qty_e8,filled_qty_e8,fill_pct,notional_usd,post_only,reduce_only,ok,err,profit_expect_bps,total_cost_usd,total_fees_usd,total_cost_plus_fees_usd,expected_profit_usd,n_completed_routes\n";
+        let header = "event_type,ts_ms,run_label,leg,exchange,side,price_cents,qty_e8,filled_qty_e8,fill_pct,notional_usd,post_only,reduce_only,ok,err,profit_expect_bps,total_cost_usd,total_fees_usd,total_cost_plus_fees_usd,expected_profit_usd,n_completed_routes,leg1_filled_e8,leg2_filled_e8,hedge_fill_pct,hedge_retry,unhedged_e8,hedge_complete\n";
         if let Err(e) = w.write_all(header.as_bytes()).await {
             eprintln!("csv metrics: failed to write header: {e}");
             return;
@@ -94,6 +97,8 @@ pub fn start_csv_writer(path: PathBuf, run_label: String) -> CsvHandle {
         let mut total_fees_usd: f64 = 0.0;
         let mut expected_profit_usd: f64 = 0.0;
         let mut n_completed_routes: u64 = 0;
+        let mut n_fully_hedged: u64 = 0;
+        let mut n_hedge_retries: u64 = 0;
 
         loop {
             tokio::select! {
@@ -123,7 +128,7 @@ pub fn start_csv_writer(path: PathBuf, run_label: String) -> CsvHandle {
                                 total_fees_usd += notional_usd * bps / 10_000.0;
                             }
 
-                            let cols: [String; 21] = [
+                            let cols: [String; 27] = [
                                 "order_attempt".to_string(),
                                 o.ts_ms.to_string(),
                                 csv_escape(&run_label),
@@ -140,11 +145,17 @@ pub fn start_csv_writer(path: PathBuf, run_label: String) -> CsvHandle {
                                 o.ok.to_string(),
                                 csv_escape(o.err.as_deref().unwrap_or("")),
                                 o.profit_expect_bps.map(|x| x.to_string()).unwrap_or_default(),
-                                "".to_string(), // total_cost_usd
-                                "".to_string(), // total_fees_usd
-                                "".to_string(), // total_cost_plus_fees_usd
-                                "".to_string(), // expected_profit_usd
-                                "".to_string(), // n_completed_routes
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
                             ];
                             let line = format!("{}\n", cols.join(","));
                             if let Err(e) = w.write_all(line.as_bytes()).await {
@@ -166,25 +177,37 @@ pub fn start_csv_writer(path: PathBuf, run_label: String) -> CsvHandle {
                                 expected_profit_usd +=
                                     buy_n * (r.profit_expect_bps as f64 / 10_000.0);
                             }
+                            if r.hedge_complete {
+                                n_fully_hedged += 1;
+                            }
+                            if r.hedge_retry {
+                                n_hedge_retries += 1;
+                            }
                             let pair = format!("{:?}->{:?}", r.buy_exchange, r.sell_exchange);
                             let buy_notional = (r.buy_price_cents as f64 / 100.0)
                                 * (r.qty_e8 as f64 / 100_000_000.0);
                             let hedge_ok = r.first_ok && r.second_ok;
+                            let hedge_fill_pct = if r.leg1_filled_e8 > 0 {
+                                r.leg2_filled_e8 as f64 / r.leg1_filled_e8 as f64
+                            } else {
+                                0.0
+                            };
+                            let unhedged_e8 = r.leg1_filled_e8.saturating_sub(r.leg2_filled_e8);
                             let details = format!(
-                                "first_ok={} second_ok={} sell_px_cents={}",
-                                r.first_ok, r.second_ok, r.sell_price_cents
+                                "first_ok={} second_ok={} sell_px_cents={} leg2_filled_e8={}",
+                                r.first_ok, r.second_ok, r.sell_price_cents, r.leg2_filled_e8
                             );
-                            let cols: [String; 21] = [
+                            let cols: [String; 27] = [
                                 "route_outcome".to_string(),
                                 chrono::Utc::now().timestamp_millis().to_string(),
                                 csv_escape(&run_label),
                                 "route".to_string(),
-                                csv_escape(&pair), // exchange column used for "BUY->SELL"
-                                "".to_string(),     // side
+                                csv_escape(&pair),
+                                "".to_string(),
                                 r.buy_price_cents.to_string(),
                                 r.qty_e8.to_string(),
-                                "".to_string(), // filled_qty_e8
-                                "".to_string(), // fill_pct
+                                r.leg2_filled_e8.to_string(),
+                                format!("{hedge_fill_pct:.6}"),
                                 format!("{buy_notional:.8}"),
                                 "false".to_string(),
                                 "false".to_string(),
@@ -196,6 +219,12 @@ pub fn start_csv_writer(path: PathBuf, run_label: String) -> CsvHandle {
                                 "".to_string(),
                                 "".to_string(),
                                 "".to_string(),
+                                r.leg1_filled_e8.to_string(),
+                                r.leg2_filled_e8.to_string(),
+                                format!("{hedge_fill_pct:.6}"),
+                                r.hedge_retry.to_string(),
+                                unhedged_e8.to_string(),
+                                r.hedge_complete.to_string(),
                             ];
                             let route_line = format!("{}\n", cols.join(","));
                             let _ = w.write_all(route_line.as_bytes()).await;
@@ -216,29 +245,37 @@ pub fn start_csv_writer(path: PathBuf, run_label: String) -> CsvHandle {
         let ok_rate = if n_orders > 0 { (n_ok as f64) / (n_orders as f64) } else { 0.0 };
 
         let total_cost_plus_fees = total_cost_usd + total_fees_usd;
-        let summary_err = csv_escape(&format!("n_orders={n_orders} n_ok={n_ok} ok_rate={ok_rate:.6}"));
-        let summary_cols: [String; 21] = [
+        let summary_err = csv_escape(&format!(
+            "n_orders={n_orders} n_ok={n_ok} ok_rate={ok_rate:.6} n_fully_hedged={n_fully_hedged} n_hedge_retries={n_hedge_retries}"
+        ));
+        let summary_cols: [String; 27] = [
             "summary".to_string(),
             chrono::Utc::now().timestamp_millis().to_string(),
             csv_escape(&run_label),
-            "".to_string(), // leg
-            "".to_string(), // exchange
-            "".to_string(), // side
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
             avg_price_cents.to_string(),
-            "".to_string(), // qty_e8
-            "".to_string(), // filled_qty_e8
-            "".to_string(), // fill_pct
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
             format!("{avg_notional:.8}"),
-            "".to_string(), // post_only
-            "".to_string(), // reduce_only
-            "".to_string(), // ok
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
             summary_err,
-            "".to_string(), // profit_expect_bps
+            "".to_string(),
             format!("{total_cost_usd:.8}"),
             format!("{total_fees_usd:.8}"),
             format!("{total_cost_plus_fees:.8}"),
             format!("{expected_profit_usd:.8}"),
             n_completed_routes.to_string(),
+            "".to_string(),
+            "".to_string(),
+            "".to_string(),
+            n_hedge_retries.to_string(),
+            "".to_string(),
+            n_fully_hedged.to_string(),
         ];
         let summary = format!("{}\n", summary_cols.join(","));
         let _ = w.write_all(summary.as_bytes()).await;

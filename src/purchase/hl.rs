@@ -402,7 +402,8 @@ impl OrderExecutor for HyperliquidExecutor {
             "limit_px": limit_px.to_string(),
             "sz": sz.to_string(),
             "reduce_only": req.reduce_only,
-            "post_only": req.post_only
+            "post_only": req.post_only,
+            "aggressive_hedge": req.aggressive_hedge
         });
         let body = serde_json::to_string(&root)
             .map_err(|e| ExecError::SendFailed(format!("hyperliquid json: {e}")))?;
@@ -534,12 +535,21 @@ impl OrderExecutor for HyperliquidExecutor {
 
         let reduce_only = v.get("reduce_only").and_then(|x| x.as_bool()).unwrap_or(false);
         let post_only = v.get("post_only").and_then(|x| x.as_bool()).unwrap_or(true);
+        let aggressive_hedge = v
+            .get("aggressive_hedge")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
 
         // For IOC orders, ensure we actually cross the Hyperliquid spread so the order can match.
-        // This is the main fix for "could not immediately match".
-        if !post_only && self.ioc_cross_bps > 0 {
+        if !post_only {
             let (best_bid, best_ask) = self.fetch_top_of_book(&self.perp_symbol).await?;
-            let bps = Decimal::from(self.ioc_cross_bps as i64);
+            let cross_bps = if aggressive_hedge {
+                self.ioc_cross_bps.saturating_mul(3).max(20)
+            } else {
+                self.ioc_cross_bps
+            };
+            if cross_bps > 0 {
+            let bps = Decimal::from(cross_bps as i64);
             let ten_k = Decimal::from(10_000);
             if is_buy {
                 // Buy: cross above ask a bit.
@@ -547,6 +557,7 @@ impl OrderExecutor for HyperliquidExecutor {
             } else {
                 // Sell: cross below bid a bit.
                 limit_px = best_bid * (Decimal::ONE - bps / ten_k);
+            }
             }
         }
 

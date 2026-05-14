@@ -164,9 +164,6 @@ impl ArbitrageDetector {
         if !self.is_profitable(net_profit, gross_profit_total, best_ask_price) {
             return None;
         }
-        println!("Gross profit before fees: {} cents", gross_profit_total);
-
-        println!("Net profit after fees: {} cents", net_profit);
 
         Some(ArbitrageOpportunity::new(
             best_ask_exchange,
@@ -235,10 +232,6 @@ impl ArbitrageDetector {
             return None;
         }
 
-        println!("Gross profit before fees: {} cents", gross_profit_total);
-
-        println!("Net profit after fees: {} cents", net_profit);
-
         Some(ArbitrageOpportunity::new(
             our_exchange,
             best_bid_exchange,
@@ -252,7 +245,7 @@ impl ArbitrageDetector {
     }
 
     /// Check if an opportunity is profitable based on thresholds
-    fn is_profitable(&self, net_profit: u64, gross_profit: u64, base_price: u64) -> bool {
+    fn is_profitable(&self, net_profit: u64, _gross_profit: u64, base_price: u64) -> bool {
         // Check minimum profit in cents
         if net_profit < self.min_profit_cents {
             return false;
@@ -265,8 +258,6 @@ impl ArbitrageDetector {
                 return false;
             }
         }
-
-        println!("Gross profit: {:?}", gross_profit);
 
         true
     }

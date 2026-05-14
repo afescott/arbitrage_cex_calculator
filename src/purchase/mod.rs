@@ -51,6 +51,8 @@ pub struct LimitOrderRequest {
     pub reduce_only: bool,
     /// Market order (Bitget: `orderType=market`; price ignored).
     pub market: bool,
+    /// Hedge retry: cross the book more aggressively on Hyperliquid IOC.
+    pub aggressive_hedge: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +256,27 @@ pub(crate) trait PurchaseVenueModule {
     fn preflight(ctx: &ExecutorContext) -> Result<(), &'static str>;
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct HlPositionLedger {
+    /// Signed net base qty × 1e8: positive = long, negative = short.
+    pub net_qty_e8: i64,
+}
+
+impl HlPositionLedger {
+    pub fn apply_fill(&mut self, side: OrderSide, closing: bool, filled_e8: u64) {
+        if filled_e8 == 0 {
+            return;
+        }
+        let delta = match (side, closing) {
+            (OrderSide::Buy, false) => filled_e8 as i64,
+            (OrderSide::Sell, false) => -(filled_e8 as i64),
+            (OrderSide::Buy, true) => filled_e8 as i64,
+            (OrderSide::Sell, true) => -(filled_e8 as i64),
+        };
+        self.net_qty_e8 += delta;
+    }
+}
+
 #[cfg(feature = "bitget")]
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct BitgetPositionLedger {
@@ -295,6 +318,7 @@ pub struct PurchaseManager {
     perp_symbol: String,
     notional_usd_per_leg: u64,
     execute_live: bool,
+    hl_ledger: HlPositionLedger,
     #[cfg(feature = "bitget")]
     bitget_ledger: BitgetPositionLedger,
     #[cfg(feature = "csv")]
@@ -325,6 +349,7 @@ impl PurchaseManager {
             perp_symbol,
             notional_usd_per_leg,
             execute_live,
+            hl_ledger: HlPositionLedger::default(),
             #[cfg(feature = "bitget")]
             bitget_ledger: BitgetPositionLedger::default(),
             csv_tx,
@@ -350,6 +375,7 @@ impl PurchaseManager {
             perp_symbol,
             notional_usd_per_leg,
             execute_live,
+            hl_ledger: HlPositionLedger::default(),
             #[cfg(feature = "bitget")]
             bitget_ledger: BitgetPositionLedger::default(),
         }
@@ -383,13 +409,13 @@ impl PurchaseManager {
             tokio::select! {
                 changed = shutdown.changed() => {
                     if changed.is_ok() && *shutdown.borrow() {
-                        self.flatten_bitget_positions().await;
+                        self.flatten_all_positions().await;
                         return;
                     }
                 }
                 route = self.rx.recv() => {
                     let Some(route) = route else {
-                        self.flatten_bitget_positions().await;
+                        self.flatten_all_positions().await;
                         return;
                     };
                     if !Self::sizing_ok(self.notional_usd_per_leg, &self.perp_symbol) {
@@ -461,6 +487,7 @@ impl PurchaseManager {
                 post_only: false,
                 reduce_only: true,
                 market: true,
+                aggressive_hedge: false,
             };
             if let Ok(ack) = self.submit_bitget_order(req).await {
                 if let Some(filled) = ack.filled_qty_e8 {
@@ -480,6 +507,7 @@ impl PurchaseManager {
                 post_only: false,
                 reduce_only: true,
                 market: true,
+                aggressive_hedge: false,
             };
             if let Ok(ack) = self.submit_bitget_order(req).await {
                 if let Some(filled) = ack.filled_qty_e8 {
@@ -491,6 +519,63 @@ impl PurchaseManager {
 
     #[cfg(not(feature = "bitget"))]
     async fn flatten_bitget_positions(&mut self) {}
+
+    async fn flatten_hyperliquid_positions(&mut self) {
+        if !self.execute_live || !self.order.has_hyperliquid() {
+            return;
+        }
+        let sym = self.perp_symbol.clone();
+        let net = self.hl_ledger.net_qty_e8;
+        if net > 0 {
+            let qty = net as u64;
+            eprintln!("Hyperliquid flatten: IOC sell reduce qty_e8={qty}");
+            let req = LimitOrderRequest {
+                exchange: Exchange::Hyperliquid,
+                symbol: sym.clone(),
+                side: OrderSide::Sell,
+                price_cents: 0,
+                qty_sats: qty,
+                post_only: false,
+                reduce_only: true,
+                market: false,
+                aggressive_hedge: true,
+            };
+            let _ = self.submit_hyperliquid_order(req).await;
+        } else if net < 0 {
+            let qty = (-net) as u64;
+            eprintln!("Hyperliquid flatten: IOC buy reduce qty_e8={qty}");
+            let req = LimitOrderRequest {
+                exchange: Exchange::Hyperliquid,
+                symbol: sym,
+                side: OrderSide::Buy,
+                price_cents: 0,
+                qty_sats: qty,
+                post_only: false,
+                reduce_only: true,
+                market: false,
+                aggressive_hedge: true,
+            };
+            let _ = self.submit_hyperliquid_order(req).await;
+        }
+    }
+
+    async fn flatten_all_positions(&mut self) {
+        self.flatten_bitget_positions().await;
+        self.flatten_hyperliquid_positions().await;
+    }
+
+    async fn submit_hyperliquid_order(
+        &mut self,
+        req: LimitOrderRequest,
+    ) -> Result<OrderAck, ExecError> {
+        let closing = req.reduce_only;
+        let side = req.side;
+        let ack = submit_limit_order(&self.order, req).await?;
+        if let Some(filled) = ack.filled_qty_e8 {
+            self.hl_ledger.apply_fill(side, closing, filled);
+        }
+        Ok(ack)
+    }
 
     #[cfg(feature = "bitget")]
     async fn submit_bitget_order(
@@ -510,6 +595,7 @@ impl PurchaseManager {
                     post_only: false,
                     reduce_only: true,
                     market: true,
+                    aggressive_hedge: false,
                 };
                 let ack = submit_limit_order(&self.order, close).await?;
                 if let Some(filled) = ack.filled_qty_e8 {
@@ -527,6 +613,7 @@ impl PurchaseManager {
                     post_only: false,
                     reduce_only: true,
                     market: true,
+                    aggressive_hedge: false,
                 };
                 let ack = submit_limit_order(&self.order, close).await?;
                 if let Some(filled) = ack.filled_qty_e8 {
@@ -549,10 +636,10 @@ impl PurchaseManager {
         &mut self,
         req: LimitOrderRequest,
     ) -> Result<OrderAck, ExecError> {
-        if req.exchange == Exchange::Bitget && self.execute_live {
-            self.submit_bitget_order(req).await
-        } else {
-            submit_limit_order(&self.order, req).await
+        match req.exchange {
+            Exchange::Bitget if self.execute_live => self.submit_bitget_order(req).await,
+            Exchange::Hyperliquid if self.execute_live => self.submit_hyperliquid_order(req).await,
+            _ => submit_limit_order(&self.order, req).await,
         }
     }
 
@@ -561,7 +648,11 @@ impl PurchaseManager {
         &mut self,
         req: LimitOrderRequest,
     ) -> Result<OrderAck, ExecError> {
-        submit_limit_order(&self.order, req).await
+        if req.exchange == Exchange::Hyperliquid && self.execute_live {
+            self.submit_hyperliquid_order(req).await
+        } else {
+            submit_limit_order(&self.order, req).await
+        }
     }
 
     fn sizing_ok(notional_usd_per_leg: u64, perp_symbol: &str) -> bool {
@@ -589,6 +680,7 @@ impl PurchaseManager {
             post_only: false,
             reduce_only: false,
             market: false,
+            aggressive_hedge: false,
         };
         let res_first = self.submit_order(first).await;
         println!("First leg submit result: {:?}", res_first);
@@ -630,7 +722,8 @@ impl PurchaseManager {
             Err(_) => {
                 println!("Skipping second leg: first leg failed at submit-time.");
                 #[cfg(feature = "csv")]
-                self.emit_route_outcome(route, qty_sats, false, false).await;
+                self.emit_route_outcome(route, qty_sats, false, false, 0, 0, false, false)
+                    .await;
                 return Ok(());
             }
         };
@@ -643,7 +736,8 @@ impl PurchaseManager {
             Some(0) => {
                 println!("Skipping second leg: first leg submit OK but filled_qty_e8=0 (no fill).");
                 #[cfg(feature = "csv")]
-                self.emit_route_outcome(route, qty_sats, true, false).await;
+                self.emit_route_outcome(route, qty_sats, true, false, 0, 0, false, false)
+                    .await;
                 return Ok(());
             }
             Some(q) => q,
@@ -657,7 +751,8 @@ impl PurchaseManager {
                 } else {
                     println!("Skipping second leg: first leg submit OK but fill is unknown (no fill tracking for this venue yet).");
                     #[cfg(feature = "csv")]
-                    self.emit_route_outcome(route, qty_sats, true, false).await;
+                    self.emit_route_outcome(route, qty_sats, true, false, 0, 0, false, false)
+                    .await;
                     return Ok(());
                 }
             }
@@ -669,23 +764,41 @@ impl PurchaseManager {
             );
         }
 
-        let second = LimitOrderRequest {
-            exchange: route.sell_exchange,
-            symbol: sym,
-            side: OrderSide::Sell,
-            price_cents: route.sell_price,
-            qty_sats: filled_qty,
-            post_only: false,
-            reduce_only: false,
-            market: false,
-        };
-        let res_second = self.submit_order(second).await;
+        let mut hedge_retry = false;
+        let mut res_second = self
+            .place_hedge_leg(route, &sym, filled_qty, route.sell_price, false)
+            .await;
         println!("Second leg submit result: {:?}", res_second);
+
+        if let Some(retry_qty) = Self::hedge_retry_qty(filled_qty, &res_second) {
+            hedge_retry = true;
+            eprintln!(
+                "Hedge incomplete on {:?}: retry once qty_e8={} (market/aggressive IOC)",
+                route.sell_exchange, retry_qty
+            );
+            let res_retry = self
+                .place_hedge_leg(route, &sym, retry_qty, route.sell_price, true)
+                .await;
+            println!("Hedge retry result: {:?}", res_retry);
+            res_second = Self::merge_hedge_attempts(&res_second, &res_retry);
+        }
+
+        let leg2_filled_e8 = res_second
+            .as_ref()
+            .ok()
+            .and_then(|a| a.filled_qty_e8)
+            .unwrap_or(0);
+        let hedge_complete = res_second.is_ok()
+            && matches!(
+                res_second.as_ref().ok().and_then(|a| a.filled_qty_e8),
+                Some(h) if h >= filled_qty
+            );
+
         #[cfg(feature = "csv")]
         match res_second.as_ref() {
             Ok(ack) => {
                 self.emit_order_attempt(
-                    "second",
+                    if hedge_retry { "second_retry" } else { "second" },
                     route.sell_exchange,
                     OrderSide::Sell,
                     route.sell_price,
@@ -700,7 +813,7 @@ impl PurchaseManager {
             }
             Err(e) => {
                 self.emit_order_attempt(
-                    "second",
+                    if hedge_retry { "second_retry" } else { "second" },
                     route.sell_exchange,
                     OrderSide::Sell,
                     route.sell_price,
@@ -715,8 +828,17 @@ impl PurchaseManager {
             }
         };
         #[cfg(feature = "csv")]
-        self.emit_route_outcome(route, filled_qty, true, res_second.is_ok())
-            .await;
+        self.emit_route_outcome(
+            route,
+            filled_qty,
+            true,
+            res_second.is_ok(),
+            filled_qty,
+            leg2_filled_e8,
+            hedge_retry,
+            hedge_complete,
+        )
+        .await;
 
         if filled_qty > 0 {
             if let Err(e) = &res_second {
@@ -726,14 +848,81 @@ impl PurchaseManager {
                 ));
             }
             if let Ok(ack) = &res_second {
-                if let Some(reason) =
-                    Self::hedge_fill_mismatch(filled_qty, route, ack)
-                {
+                if let Some(reason) = Self::hedge_fill_mismatch(filled_qty, route, ack) {
                     return Err(reason);
                 }
             }
         }
         Ok(())
+    }
+
+    async fn place_hedge_leg(
+        &mut self,
+        route: &BuyExchangeSellExchange,
+        sym: &str,
+        qty_sats: u64,
+        price_cents: u64,
+        aggressive: bool,
+    ) -> Result<OrderAck, ExecError> {
+        let use_market = aggressive && route.sell_exchange == Exchange::Bitget;
+        let req = LimitOrderRequest {
+            exchange: route.sell_exchange,
+            symbol: sym.to_string(),
+            side: OrderSide::Sell,
+            price_cents,
+            qty_sats,
+            post_only: false,
+            reduce_only: false,
+            market: use_market,
+            aggressive_hedge: aggressive && route.sell_exchange == Exchange::Hyperliquid,
+        };
+        self.submit_order(req).await
+    }
+
+    /// Remaining hedge size to retry: submit error, zero fill, partial, or unknown fill.
+    fn hedge_retry_qty(leg1_filled: u64, res: &Result<OrderAck, ExecError>) -> Option<u64> {
+        match res {
+            Err(_) => Some(leg1_filled),
+            Ok(ack) => match ack.filled_qty_e8 {
+                Some(h) if h >= leg1_filled => None,
+                Some(h) => Some(leg1_filled.saturating_sub(h)),
+                None => Some(leg1_filled),
+            },
+        }
+    }
+
+    fn merge_hedge_attempts(
+        first: &Result<OrderAck, ExecError>,
+        second: &Result<OrderAck, ExecError>,
+    ) -> Result<OrderAck, ExecError> {
+        let f1 = first
+            .as_ref()
+            .ok()
+            .and_then(|a| a.filled_qty_e8)
+            .unwrap_or(0);
+        match second {
+            Ok(a2) => {
+                let f2 = a2.filled_qty_e8.unwrap_or(0);
+                let total = f1.saturating_add(f2);
+                let filled_qty_e8 = match (
+                    first.as_ref().ok().and_then(|a| a.filled_qty_e8),
+                    a2.filled_qty_e8,
+                ) {
+                    (None, None) => None,
+                    _ => Some(total),
+                };
+                Ok(OrderAck {
+                    exchange: a2.exchange,
+                    client_order_id: a2.client_order_id.clone(),
+                    filled_qty_e8,
+                    venue_order_id: a2.venue_order_id,
+                })
+            }
+            Err(_) => match first {
+                Ok(a) => Ok(a.clone()),
+                Err(e) => Err(ExecError::SendFailed(format!("{e:?}"))),
+            },
+        }
     }
 
     /// Halt when leg1 filled but leg2 did not fully hedge (submit OK but zero/partial/unknown fill).
@@ -806,6 +995,10 @@ impl PurchaseManager {
         qty_e8: u64,
         first_ok: bool,
         second_ok: bool,
+        leg1_filled_e8: u64,
+        leg2_filled_e8: u64,
+        hedge_retry: bool,
+        hedge_complete: bool,
     ) {
         let Some(tx) = self.csv_tx.as_ref() else {
             return;
@@ -819,6 +1012,10 @@ impl PurchaseManager {
             profit_expect_bps: route.profit_expect,
             first_ok,
             second_ok,
+            leg1_filled_e8,
+            leg2_filled_e8,
+            hedge_retry,
+            hedge_complete,
         };
         let _ = tx.try_send(CsvEvent::RouteOutcome(ev));
     }
