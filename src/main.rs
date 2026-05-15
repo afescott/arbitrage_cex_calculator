@@ -17,6 +17,8 @@ use api::DydxClient;
 use tracing::Level;
 use tracing_subscriber;
 
+use std::time::Duration;
+
 use crate::{args::Args, orderbook::book::OrderBook, purchase::PurchaseManager};
 
 #[tokio::main]
@@ -108,7 +110,7 @@ async fn run(order_book_name: String, args: Args) {
 
     let orderbook = OrderBook::new(order_book_name);
 
-    let aggregator_handle =
+    let mut aggregator_handle =
         crate::orderbook::spawn_exchange_price_aggregator(orderbook, rx, tx_purchase);
 
     #[cfg(feature = "csv")]
@@ -140,7 +142,9 @@ async fn run(order_book_name: String, args: Args) {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let purchase_handle = tokio::spawn(async move {
+    let run_secs_limit = args.run_seconds.filter(|&s| s > 0);
+
+    let mut purchase_handle = tokio::spawn(async move {
         #[cfg(feature = "csv")]
         let mut pm = PurchaseManager::new(rx_purchase, args, csv_tx_opt);
         #[cfg(not(feature = "csv"))]
@@ -148,13 +152,22 @@ async fn run(order_book_name: String, args: Args) {
         pm.run_purchase_simulation(shutdown_rx).await;
     });
 
-    // Shutdown on Ctrl-C or aggregator exit; signal purchase to flatten Bitget before exit.
+    // Shutdown on Ctrl-C, aggregator exit, purchase exit (--max-routes / rx closed), or --run-seconds.
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             eprintln!("ctrl-c: shutting down");
         }
-        _ = aggregator_handle => {
+        _ = &mut aggregator_handle => {
             eprintln!("aggregator task ended");
+        }
+        res = &mut purchase_handle => {
+            match res {
+                Ok(()) => eprintln!("purchase task ended"),
+                Err(e) => eprintln!("purchase task join error: {e}"),
+            }
+        },
+        _ = tokio::time::sleep(Duration::from_secs(run_secs_limit.unwrap())), if run_secs_limit.is_some() => {
+            eprintln!("--run-seconds limit reached: shutting down");
         }
     }
 

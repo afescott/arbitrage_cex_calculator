@@ -190,6 +190,17 @@ impl ExecutorContext {
         self.bitget.is_some()
     }
 
+    #[cfg(feature = "bitget")]
+    pub async fn bitget_flatten_all(&self) -> Result<(), ExecError> {
+        let ex = self
+            .bitget
+            .as_ref()
+            .ok_or(ExecError::MissingCredentials(
+                "--bitget-api-key/--bitget-api-secret/--bitget-passphrase",
+            ))?;
+        ex.flatten_btc_positions().await
+    }
+
     #[cfg(not(feature = "bitget"))]
     pub fn has_bitget(&self) -> bool {
         false
@@ -318,6 +329,9 @@ pub struct PurchaseManager {
     perp_symbol: String,
     notional_usd_per_leg: u64,
     execute_live: bool,
+    /// Cap on routes handled (dry-run or live); `None` = unlimited.
+    max_routes: Option<u64>,
+    routes_handled: u64,
     hl_ledger: HlPositionLedger,
     #[cfg(feature = "bitget")]
     bitget_ledger: BitgetPositionLedger,
@@ -349,6 +363,8 @@ impl PurchaseManager {
             perp_symbol,
             notional_usd_per_leg,
             execute_live,
+            max_routes: args.max_routes,
+            routes_handled: 0,
             hl_ledger: HlPositionLedger::default(),
             #[cfg(feature = "bitget")]
             bitget_ledger: BitgetPositionLedger::default(),
@@ -375,10 +391,28 @@ impl PurchaseManager {
             perp_symbol,
             notional_usd_per_leg,
             execute_live,
+            max_routes: args.max_routes,
+            routes_handled: 0,
             hl_ledger: HlPositionLedger::default(),
             #[cfg(feature = "bitget")]
             bitget_ledger: BitgetPositionLedger::default(),
         }
+    }
+
+    async fn bump_route_count_and_maybe_stop(&mut self) -> bool {
+        let Some(max) = self.max_routes else {
+            return false;
+        };
+        self.routes_handled = self.routes_handled.saturating_add(1);
+        if self.routes_handled >= max {
+            eprintln!(
+                "--max-routes {} reached (handled {}); shutting down purchase loop",
+                max, self.routes_handled
+            );
+            self.flatten_all_positions().await;
+            return true;
+        }
+        false
     }
 
     fn run_venue_preflight(&self) -> Result<(), &'static str> {
@@ -456,6 +490,9 @@ impl PurchaseManager {
                                 "Live trading disabled; still draining routes so market-data feeds stay unblocked."
                             );
                             live_trading_enabled = false;
+                            if self.bump_route_count_and_maybe_stop().await {
+                                return;
+                            }
                             continue;
                         }
                     } else {
@@ -463,6 +500,10 @@ impl PurchaseManager {
                             "DRY RUN (--execute-live=0): would LONG on {:?} and SHORT on {:?} (qty_e8={}, notional_usd_per_leg={})",
                             route.buy_exchange, route.sell_exchange, qty_sats, self.notional_usd_per_leg
                         );
+                    }
+
+                    if self.bump_route_count_and_maybe_stop().await {
+                        return;
                     }
                 }
             }
@@ -474,46 +515,11 @@ impl PurchaseManager {
         if !self.execute_live || !self.order.has_bitget() {
             return;
         }
-        let sym = self.perp_symbol.clone();
-        if self.bitget_ledger.has_short() {
-            let qty = self.bitget_ledger.short_qty_e8;
-            eprintln!("Bitget flatten: market close short qty_e8={qty}");
-            let req = LimitOrderRequest {
-                exchange: Exchange::Bitget,
-                symbol: sym.clone(),
-                side: OrderSide::Buy,
-                price_cents: 0,
-                qty_sats: qty,
-                post_only: false,
-                reduce_only: true,
-                market: true,
-                aggressive_hedge: false,
-            };
-            if let Ok(ack) = self.submit_bitget_order(req).await {
-                if let Some(filled) = ack.filled_qty_e8 {
-                    self.bitget_ledger.apply_fill(OrderSide::Buy, true, filled);
-                }
+        match self.order.bitget_flatten_all().await {
+            Ok(()) => {
+                self.bitget_ledger = BitgetPositionLedger::default();
             }
-        }
-        if self.bitget_ledger.has_long() {
-            let qty = self.bitget_ledger.long_qty_e8;
-            eprintln!("Bitget flatten: market close long qty_e8={qty}");
-            let req = LimitOrderRequest {
-                exchange: Exchange::Bitget,
-                symbol: sym,
-                side: OrderSide::Sell,
-                price_cents: 0,
-                qty_sats: qty,
-                post_only: false,
-                reduce_only: true,
-                market: true,
-                aggressive_hedge: false,
-            };
-            if let Ok(ack) = self.submit_bitget_order(req).await {
-                if let Some(filled) = ack.filled_qty_e8 {
-                    self.bitget_ledger.apply_fill(OrderSide::Sell, true, filled);
-                }
-            }
+            Err(e) => eprintln!("Bitget flatten FAILED: {e:?}"),
         }
     }
 
@@ -560,8 +566,10 @@ impl PurchaseManager {
     }
 
     async fn flatten_all_positions(&mut self) {
+        eprintln!("Shutdown flatten: closing open venue positions…");
         self.flatten_bitget_positions().await;
         self.flatten_hyperliquid_positions().await;
+        eprintln!("Shutdown flatten: done");
     }
 
     async fn submit_hyperliquid_order(

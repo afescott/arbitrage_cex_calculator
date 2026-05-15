@@ -102,6 +102,13 @@ pub struct Args {
     /// 0 = no live orders (dry run); 1 = submit real orders.
     pub execute_live: bool,
 
+    /// If set (>0), request graceful shutdown after this many wall-clock seconds (same path as Ctrl-C).
+    pub run_seconds: Option<u64>,
+
+    /// If set (>0), stop the purchase loop after this many arb routes **handled** (dry-run or live
+    /// attempt after sizing); then flatten like shutdown. Ignored when unset.
+    pub max_routes: Option<u64>,
+
     /// Bitget perps (mix) API credentials (feature = "bitget").
     #[cfg(feature = "bitget")]
     pub bitget_api_key: Option<String>,
@@ -128,6 +135,8 @@ impl Args {
     /// - `--bias <buy|sell>`
     /// - `--budget <USD>` (integer dollars; default `1` for small test runs)
     /// - `--execute-live <0|1>` (default `0`; when `1`, submits real orders)
+    /// - `--run-seconds <N>` or `RUN_SECONDS` (optional; N>0 triggers shutdown after N seconds)
+    /// - `--max-routes <N>` or `MAX_ROUTES` (optional; N>0 stops purchase after N processed routes)
     /// - `--hyperliquid-asset-id <N>` (perp index in `meta.universe`; optional for `BTC` default guess `0`)
     /// - `--hyperliquid-network <mainnet|testnet>` (optional; default depends on `--execute-live`)
     /// - `--hyperliquid-ioc-cross-bps <BPS>` (optional; default `2`)
@@ -196,6 +205,34 @@ impl Args {
             Some("1") | Some("true") | Some("yes") => true,
             Some("0") | Some("false") | Some("no") | None => false,
             Some(other) => return Err(format!("Invalid value for `--execute-live`: `{other}`")),
+        };
+
+        let run_seconds = match cli_or_env(&map, "--run-seconds", "RUN_SECONDS").as_deref() {
+            Some(v) => {
+                let n = v
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid value for `--run-seconds`: `{v}`"))?;
+                if n == 0 {
+                    None
+                } else {
+                    Some(n)
+                }
+            }
+            None => None,
+        };
+
+        let max_routes = match cli_or_env(&map, "--max-routes", "MAX_ROUTES").as_deref() {
+            Some(v) => {
+                let n = v
+                    .parse::<u64>()
+                    .map_err(|_| format!("Invalid value for `--max-routes`: `{v}`"))?;
+                if n == 0 {
+                    None
+                } else {
+                    Some(n)
+                }
+            }
+            None => None,
         };
 
         let pair = cli_or_env(&map, "--pair", "PAIR");
@@ -311,6 +348,8 @@ impl Args {
             bias,
             budget,
             execute_live,
+            run_seconds,
+            max_routes,
             #[cfg(feature = "csv")]
             csv_path,
             #[cfg(feature = "bitget")]

@@ -75,6 +75,37 @@ impl BitgetExecutor {
             .map_err(|e| ExecError::SendFailed(format!("bitget json: {e}")))
     }
 
+    async fn signed_post(&self, request_path: &str, body: &str) -> Result<Value, ExecError> {
+        let ts_ms = Utc::now().timestamp_millis();
+        let method = "POST";
+        let sign = self.sign_request(ts_ms, method, request_path, body);
+        let url = format!("{}{}", self.base_url, request_path);
+        let resp = self
+            .http
+            .post(url)
+            .header(CONTENT_TYPE, "application/json")
+            .header("ACCESS-KEY", &self.api_key)
+            .header("ACCESS-SIGN", sign)
+            .header("ACCESS-TIMESTAMP", ts_ms.to_string())
+            .header("ACCESS-PASSPHRASE", &self.passphrase)
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("bitget http: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ExecError::SendFailed(format!("bitget body: {e}")))?;
+        if !status.is_success() {
+            return Err(ExecError::SendFailed(format!(
+                "bitget HTTP {status}: {}",
+                text.chars().take(800).collect::<String>()
+            )));
+        }
+        serde_json::from_str(&text).map_err(|e| ExecError::SendFailed(format!("bitget json: {e}")))
+    }
+
     /// IOC fills may land slightly after `place-order`; poll order detail briefly.
     async fn poll_filled_qty_e8(&self, order_id: &str) -> Result<Option<u64>, ExecError> {
         let request_path = format!(
@@ -108,6 +139,143 @@ impl BitgetExecutor {
             }
         }
         Ok(Some(0))
+    }
+
+    /// Flash-close BTCUSDT perps at market via Bitget `close-positions` (not `place-order`).
+    pub(crate) async fn flatten_btc_positions(&self) -> Result<(), ExecError> {
+        const PATH: &str = "/api/v2/mix/position/all-position?productType=USDT-FUTURES&marginCoin=USDT";
+        let v = self.signed_get(PATH).await?;
+        let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("");
+        if code != "00000" {
+            return Err(ExecError::SendFailed(format!(
+                "bitget positions API: {}",
+                v.to_string().chars().take(400).collect::<String>()
+            )));
+        }
+
+        let rows: Vec<&Value> = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|row| {
+                        row.get("symbol")
+                            .and_then(|s| s.as_str())
+                            .is_some_and(|sym| sym.eq_ignore_ascii_case("BTCUSDT"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if rows.is_empty() {
+            eprintln!("Bitget flatten: no BTCUSDT rows in position response");
+            return Ok(());
+        }
+
+        let one_way = rows.iter().any(|row| {
+            row.get("posMode")
+                .and_then(|m| m.as_str())
+                .is_some_and(|m| m == "one_way_mode")
+        });
+
+        let mut long_e8 = 0u64;
+        let mut short_e8 = 0u64;
+        for row in &rows {
+            let total = row
+                .get("total")
+                .or_else(|| row.get("available"))
+                .and_then(|x| x.as_str())
+                .and_then(|s| parse_quantity_smallest_unit(s, 8))
+                .unwrap_or(0);
+            if total == 0 {
+                continue;
+            }
+            match row.get("holdSide").and_then(|s| s.as_str()) {
+                Some("long") => long_e8 = long_e8.saturating_add(total),
+                Some("short") => short_e8 = short_e8.saturating_add(total),
+                _ => {
+                    // one-way net row: treat as whichever side has size
+                    long_e8 = long_e8.saturating_add(total);
+                }
+            }
+        }
+
+        eprintln!(
+            "Bitget flatten: pos_mode={} long_e8={long_e8} short_e8={short_e8}",
+            if one_way { "one_way" } else { "hedge" }
+        );
+
+        if long_e8 == 0 && short_e8 == 0 {
+            eprintln!("Bitget flatten: BTCUSDT size is zero on exchange");
+            return Ok(());
+        }
+
+        if one_way {
+            self.flash_close_positions(None).await
+        } else {
+            if long_e8 > 0 {
+                self.flash_close_positions(Some("long")).await?;
+            }
+            if short_e8 > 0 {
+                self.flash_close_positions(Some("short")).await?;
+            }
+            Ok(())
+        }
+    }
+
+    async fn flash_close_positions(&self, hold_side: Option<&str>) -> Result<(), ExecError> {
+        const PATH: &str = "/api/v2/mix/order/close-positions";
+        let mut body = serde_json::json!({
+            "symbol": "BTCUSDT",
+            "productType": "USDT-FUTURES",
+        });
+        if let Some(side) = hold_side {
+            body["holdSide"] = Value::String(side.to_string());
+        }
+        let body_str = body.to_string();
+        eprintln!(
+            "Bitget flash close: POST close-positions body={body_str}"
+        );
+
+        let v = self.signed_post(PATH, &body_str).await?;
+        let code = v.get("code").and_then(|c| c.as_str()).unwrap_or("");
+        let msg = v.get("msg").and_then(|m| m.as_str()).unwrap_or("");
+
+        if code == "00000" {
+            if let Some(data) = v.get("data") {
+                if let Some(ok) = data.get("successList").and_then(|x| x.as_array()) {
+                    for item in ok {
+                        eprintln!(
+                            "Bitget flash close OK: orderId={} symbol={}",
+                            item.get("orderId").and_then(|x| x.as_str()).unwrap_or(""),
+                            item.get("symbol").and_then(|x| x.as_str()).unwrap_or("")
+                        );
+                    }
+                }
+                if let Some(bad) = data.get("failureList").and_then(|x| x.as_array()) {
+                    for item in bad {
+                        let ec = item.get("errorCode").and_then(|x| x.as_str()).unwrap_or("");
+                        let em = item.get("errorMsg").and_then(|x| x.as_str()).unwrap_or("");
+                        if ec == "22002" {
+                            eprintln!("Bitget flash close: already flat ({em})");
+                        } else {
+                            eprintln!("Bitget flash close failure: code={ec} msg={em}");
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Already flat on this side — not an error for shutdown.
+        if code == "22002" {
+            eprintln!("Bitget flash close: no position to close (holdSide={hold_side:?})");
+            return Ok(());
+        }
+
+        Err(ExecError::SendFailed(format!(
+            "bitget close-positions code={code} msg={msg}"
+        )))
     }
 }
 
