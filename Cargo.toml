@@ -41,6 +41,8 @@ anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 pricelevel = "0.4.2"
+# In-process latency histograms for hot-path telemetry.
+hdrhistogram = "7"
 
 [profile.release]
 lto = true

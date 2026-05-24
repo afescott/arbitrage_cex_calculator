@@ -80,6 +80,9 @@ pub struct BuyExchangeSellExchange {
     pub sell_price: u64,
     pub sell_exchange: Exchange,
     pub buy_exchange: Exchange,
+    /// Monotonic timestamp set the moment `check_for_immediate_purchase` decides this route is
+    /// emittable. Used by `PurchaseManager` to record the aggregator→purchase channel latency.
+    pub t_emitted: Instant,
 }
 
 /// Arbitrage detection logic

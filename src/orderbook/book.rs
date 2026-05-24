@@ -19,6 +19,7 @@ use pricelevel::{OrderId, Side};
 use std::{
     collections::BTreeMap,
     sync::{atomic::AtomicU64, Arc, RwLock},
+    time::Instant,
 };
 
 #[warn(clippy::too_many_lines)]
@@ -167,18 +168,20 @@ impl OrderBook {
         bids_depth >= min_levels && asks_depth >= min_levels
     }
 
-    pub async fn check_for_immediate_purchase(
+    /// Returns a route to emit when this incoming tick crosses the global book against another
+    /// venue (after fees, etc.). Pure inspection: does not mutate the book and does not own the
+    /// downstream channel — the aggregator does the `try_send` so counters/telemetry stay co-located.
+    pub fn check_for_immediate_purchase(
         &self,
         price: u64,
         exchange: Exchange,
         side: Side,
         quantity: u64,
-        tx: &tokio::sync::mpsc::Sender<BuyExchangeSellExchange>,
-    ) {
+    ) -> Option<BuyExchangeSellExchange> {
         // Only proceed if orderbook has established depth (at least 3 price levels on each side)
         const MIN_DEPTH_LEVELS: usize = 3;
         if !self.has_sufficient_depth(exchange, MIN_DEPTH_LEVELS) {
-            return;
+            return None;
         }
 
         let opportunity = match side {
@@ -194,40 +197,16 @@ impl OrderBook {
                 self.arbitrage_detector
                     .check_sell_opportunity(price, exchange, best_bid, quantity)
             }
-        };
+        }?;
 
-        if let Some(opportunity) = opportunity {
-            // Single println! for all arbitrage opportunities
-
-            /* println!("Arbitrage Opportunity: Buy on {:?} at {:.4}CENTS, Sell on {:?} at ${:.4}, profit: {:?}CENTS bps : ${:?}",
-            opportunity.buy_exchange, opportunity.buy_price as f64, opportunity.sell_exchange, opportunity.sell_price as f64,
-                         opportunity.profit_cents,                       opportunity.profit_bps(),); */
-
-            let buy_exchange_sell_exchange = BuyExchangeSellExchange {
-                buy_price: opportunity.buy_price,
-                profit_expect: opportunity.profit_bps(),
-                sell_price: opportunity.sell_price,
-                sell_exchange: opportunity.sell_exchange,
-                buy_exchange: opportunity.buy_exchange,
-            };
-            // Never block the aggregator on a slow purchase loop; drop stale routes instead.
-            match tx.try_send(buy_exchange_sell_exchange) {
-                Ok(()) => {}
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    static DROPPED: std::sync::atomic::AtomicU64 =
-                        std::sync::atomic::AtomicU64::new(0);
-                    let n = DROPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if n == 1 || n % 100 == 0 {
-                        eprintln!(
-                            "purchase route channel full; dropped {n} route(s) (purchase loop busy)"
-                        );
-                    }
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    eprintln!("purchase route channel closed");
-                }
-            }
-        }
+        Some(BuyExchangeSellExchange {
+            buy_price: opportunity.buy_price,
+            profit_expect: opportunity.profit_bps(),
+            sell_price: opportunity.sell_price,
+            sell_exchange: opportunity.sell_exchange,
+            buy_exchange: opportunity.buy_exchange,
+            t_emitted: Instant::now(),
+        })
     }
 
     pub fn add_exchange_price_level(

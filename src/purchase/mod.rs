@@ -11,7 +11,17 @@ mod bitget;
 mod dydx;
 mod hl;
 
-use crate::{args::Args, calculation::BuyExchangeSellExchange, orderbook::book::Exchange, sizing};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::{
+    args::Args,
+    calculation::BuyExchangeSellExchange,
+    orderbook::book::Exchange,
+    sizing,
+    telemetry::{Stage, Telemetry},
+};
 #[cfg(feature = "csv")]
 use crate::metrics::csv::{CsvEvent, CsvOrderAttempt, CsvRouteOutcome};
 
@@ -207,8 +217,46 @@ impl ExecutorContext {
     }
 }
 
+/// Time `build_payload`, `sign`, and `send` into the telemetry histograms, then bump
+/// the `n_orders_sent` + ok/err counters. `?` short-circuits propagate errors from
+/// build/sign without recording the later stages.
+async fn execute<E: OrderExecutor>(
+    ex: &E,
+    telemetry: &Telemetry,
+    req: &LimitOrderRequest,
+) -> Result<OrderAck, ExecError> {
+    let result = execute_inner(ex, telemetry, req).await;
+    telemetry.n_orders_sent.fetch_add(1, Ordering::Relaxed);
+    if result.is_ok() {
+        telemetry.n_orders_ok.fetch_add(1, Ordering::Relaxed);
+    } else {
+        telemetry.n_orders_err.fetch_add(1, Ordering::Relaxed);
+    }
+    result
+}
+
+async fn execute_inner<E: OrderExecutor>(
+    ex: &E,
+    telemetry: &Telemetry,
+    req: &LimitOrderRequest,
+) -> Result<OrderAck, ExecError> {
+    let t0 = Instant::now();
+    let built = ex.build_payload(req)?;
+    let t1 = Instant::now();
+    telemetry.record(Stage::PurchaseBuild, t1.duration_since(t0));
+
+    let signed = ex.sign(built)?;
+    let t2 = Instant::now();
+    telemetry.record(Stage::PurchaseSign, t2.duration_since(t1));
+
+    let r = ex.send(signed).await;
+    telemetry.record(Stage::PurchaseSendToAck, t2.elapsed());
+    r
+}
+
 pub async fn submit_limit_order(
     order: &ExecutorContext,
+    telemetry: &Telemetry,
     req: LimitOrderRequest,
 ) -> Result<OrderAck, ExecError> {
     match req.exchange {
@@ -217,18 +265,14 @@ pub async fn submit_limit_order(
                 .hyperliquid
                 .as_ref()
                 .ok_or(ExecError::MissingCredentials("--hyperliquid-private-key"))?;
-            let built = ex.build_payload(&req)?;
-            let signed = ex.sign(built)?;
-            ex.send(signed).await
+            execute(ex, telemetry, &req).await
         }
         #[cfg(feature = "cex")]
         Exchange::Binance => {
             let ex = order.binance.as_ref().ok_or(ExecError::MissingCredentials(
                 "--binance-api-key/--binance-api-secret",
             ))?;
-            let built = ex.build_payload(&req)?;
-            let signed = ex.sign(built)?;
-            ex.send(signed).await
+            execute(ex, telemetry, &req).await
         }
         #[cfg(not(feature = "cex"))]
         Exchange::Binance => Err(ExecError::UnsupportedExchange(Exchange::Binance)),
@@ -240,9 +284,7 @@ pub async fn submit_limit_order(
                 .ok_or(ExecError::MissingCredentials(
                     "--bitget-api-key/--bitget-api-secret/--bitget-passphrase",
                 ))?;
-            let built = ex.build_payload(&req)?;
-            let signed = ex.sign(built)?;
-            ex.send(signed).await
+            execute(ex, telemetry, &req).await
         }
         #[cfg(not(feature = "bitget"))]
         Exchange::Bitget => Err(ExecError::UnsupportedExchange(Exchange::Bitget)),
@@ -252,9 +294,7 @@ pub async fn submit_limit_order(
                 .dydx
                 .as_ref()
                 .ok_or(ExecError::MissingCredentials("--dydx-private-key"))?;
-            let built = ex.build_payload(&req)?;
-            let signed = ex.sign(built)?;
-            ex.send(signed).await
+            execute(ex, telemetry, &req).await
         }
         #[cfg(not(feature = "dydx"))]
         Exchange::Dydx => Err(ExecError::UnsupportedExchange(Exchange::Dydx)),
@@ -335,6 +375,7 @@ pub struct PurchaseManager {
     hl_ledger: HlPositionLedger,
     #[cfg(feature = "bitget")]
     bitget_ledger: BitgetPositionLedger,
+    telemetry: Arc<Telemetry>,
     #[cfg(feature = "csv")]
     csv_tx: Option<tokio::sync::mpsc::Sender<CsvEvent>>,
 }
@@ -344,6 +385,7 @@ impl PurchaseManager {
     pub fn new(
         rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>,
         args: Args,
+        telemetry: Arc<Telemetry>,
         csv_tx: Option<tokio::sync::mpsc::Sender<CsvEvent>>,
     ) -> Self {
         let notional_usd_per_leg = args.clamped_notional_usd_per_leg();
@@ -368,12 +410,17 @@ impl PurchaseManager {
             hl_ledger: HlPositionLedger::default(),
             #[cfg(feature = "bitget")]
             bitget_ledger: BitgetPositionLedger::default(),
+            telemetry,
             csv_tx,
         }
     }
 
     #[cfg(not(feature = "csv"))]
-    pub fn new(rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>, args: Args) -> Self {
+    pub fn new(
+        rx: tokio::sync::mpsc::Receiver<BuyExchangeSellExchange>,
+        args: Args,
+        telemetry: Arc<Telemetry>,
+    ) -> Self {
         let notional_usd_per_leg = args.clamped_notional_usd_per_leg();
         let perp_symbol = args.perp_symbol.clone();
         let execute_live = args.execute_live;
@@ -396,6 +443,7 @@ impl PurchaseManager {
             hl_ledger: HlPositionLedger::default(),
             #[cfg(feature = "bitget")]
             bitget_ledger: BitgetPositionLedger::default(),
+            telemetry,
         }
     }
 
@@ -452,6 +500,8 @@ impl PurchaseManager {
                         self.flatten_all_positions().await;
                         return;
                     };
+                    self.telemetry
+                        .record(Stage::AggregatorToPurchase, route.t_emitted.elapsed());
                     if !Self::sizing_ok(self.notional_usd_per_leg, &self.perp_symbol) {
                         continue;
                     }
@@ -578,7 +628,7 @@ impl PurchaseManager {
     ) -> Result<OrderAck, ExecError> {
         let closing = req.reduce_only;
         let side = req.side;
-        let ack = submit_limit_order(&self.order, req).await?;
+        let ack = submit_limit_order(&self.order, &self.telemetry, req).await?;
         if let Some(filled) = ack.filled_qty_e8 {
             self.hl_ledger.apply_fill(side, closing, filled);
         }
@@ -605,7 +655,7 @@ impl PurchaseManager {
                     market: true,
                     aggressive_hedge: false,
                 };
-                let ack = submit_limit_order(&self.order, close).await?;
+                let ack = submit_limit_order(&self.order, &self.telemetry, close).await?;
                 if let Some(filled) = ack.filled_qty_e8 {
                     self.bitget_ledger.apply_fill(OrderSide::Buy, true, filled);
                 }
@@ -623,7 +673,7 @@ impl PurchaseManager {
                     market: true,
                     aggressive_hedge: false,
                 };
-                let ack = submit_limit_order(&self.order, close).await?;
+                let ack = submit_limit_order(&self.order, &self.telemetry, close).await?;
                 if let Some(filled) = ack.filled_qty_e8 {
                     self.bitget_ledger.apply_fill(OrderSide::Sell, true, filled);
                 }
@@ -632,7 +682,7 @@ impl PurchaseManager {
 
         let closing = req.reduce_only;
         let side = req.side;
-        let ack = submit_limit_order(&self.order, req).await?;
+        let ack = submit_limit_order(&self.order, &self.telemetry, req).await?;
         if let Some(filled) = ack.filled_qty_e8 {
             self.bitget_ledger.apply_fill(side, closing, filled);
         }
@@ -647,7 +697,7 @@ impl PurchaseManager {
         match req.exchange {
             Exchange::Bitget if self.execute_live => self.submit_bitget_order(req).await,
             Exchange::Hyperliquid if self.execute_live => self.submit_hyperliquid_order(req).await,
-            _ => submit_limit_order(&self.order, req).await,
+            _ => submit_limit_order(&self.order, &self.telemetry, req).await,
         }
     }
 
@@ -659,7 +709,7 @@ impl PurchaseManager {
         if req.exchange == Exchange::Hyperliquid && self.execute_live {
             self.submit_hyperliquid_order(req).await
         } else {
-            submit_limit_order(&self.order, req).await
+            submit_limit_order(&self.order, &self.telemetry, req).await
         }
     }
 

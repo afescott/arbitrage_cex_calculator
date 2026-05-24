@@ -5,6 +5,7 @@ mod metrics;
 mod orderbook;
 mod purchase;
 mod sizing;
+mod telemetry;
 mod util;
 
 #[cfg(feature = "cex")]
@@ -110,8 +111,14 @@ async fn run(order_book_name: String, args: Args) {
 
     let orderbook = OrderBook::new(order_book_name);
 
-    let mut aggregator_handle =
-        crate::orderbook::spawn_exchange_price_aggregator(orderbook, rx, tx_purchase);
+    let telemetry = crate::telemetry::Telemetry::new();
+
+    let mut aggregator_handle = crate::orderbook::spawn_exchange_price_aggregator(
+        orderbook,
+        telemetry.clone(),
+        rx,
+        tx_purchase,
+    );
 
     #[cfg(feature = "csv")]
     let csv_handle = {
@@ -142,13 +149,20 @@ async fn run(order_book_name: String, args: Args) {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+    let _telemetry_handle = crate::telemetry::spawn_reporter(
+        telemetry.clone(),
+        Duration::from_secs(5),
+        shutdown_rx.clone(),
+    );
+
     let run_secs_limit = args.run_seconds.filter(|&s| s > 0);
 
+    let purchase_telemetry = telemetry.clone();
     let mut purchase_handle = tokio::spawn(async move {
         #[cfg(feature = "csv")]
-        let mut pm = PurchaseManager::new(rx_purchase, args, csv_tx_opt);
+        let mut pm = PurchaseManager::new(rx_purchase, args, purchase_telemetry, csv_tx_opt);
         #[cfg(not(feature = "csv"))]
-        let mut pm = PurchaseManager::new(rx_purchase, args);
+        let mut pm = PurchaseManager::new(rx_purchase, args, purchase_telemetry);
         pm.run_purchase_simulation(shutdown_rx).await;
     });
 
