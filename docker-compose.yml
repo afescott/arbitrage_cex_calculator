@@ -1,0 +1,25 @@
+# Local observability backend for the per-route OTel spans emitted with `--features otel`.
+#
+# Usage:
+#   make jaeger-up      # start (detached)
+#   make jaeger-logs    # tail container logs
+#   make jaeger-down    # stop and remove
+#
+# Open the UI at http://localhost:16686 once `jaeger-up` reports healthy.
+#
+# Pinned image: bump intentionally when upgrading. All-in-one runs collector + query
+# + storage in a single container with in-memory storage; perfect for dev, NOT for prod.
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    restart: unless-stopped
+    environment:
+      # Native OTLP receivers (gRPC :4317, HTTP :4318). Default-enabled in this version
+      # but pinned explicitly so future image bumps don't silently drop it.
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      # Bound to 127.0.0.1 only: this is dev-only, don't expose to the LAN.
+      - "127.0.0.1:4317:4317"     # OTLP gRPC ingest (Rust exporter target)
+      - "127.0.0.1:4318:4318"     # OTLP HTTP ingest (curl / non-Rust producers)
+      - "127.0.0.1:16686:16686"   # Jaeger UI

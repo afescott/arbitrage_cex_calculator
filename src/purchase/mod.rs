@@ -220,6 +220,7 @@ impl ExecutorContext {
 /// Time `build_payload`, `sign`, and `send` into the telemetry histograms, then bump
 /// the `n_orders_sent` + ok/err counters. `?` short-circuits propagate errors from
 /// build/sign without recording the later stages.
+#[tracing::instrument(name = "execute", skip_all, fields(ok))]
 async fn execute<E: OrderExecutor>(
     ex: &E,
     telemetry: &Telemetry,
@@ -232,6 +233,7 @@ async fn execute<E: OrderExecutor>(
     } else {
         telemetry.n_orders_err.fetch_add(1, Ordering::Relaxed);
     }
+    tracing::Span::current().record("ok", result.is_ok());
     result
 }
 
@@ -241,19 +243,41 @@ async fn execute_inner<E: OrderExecutor>(
     req: &LimitOrderRequest,
 ) -> Result<OrderAck, ExecError> {
     let t0 = Instant::now();
-    let built = ex.build_payload(req)?;
+    let built = {
+        let _g = tracing::trace_span!("build_payload").entered();
+        ex.build_payload(req)?
+    };
     let t1 = Instant::now();
     telemetry.record(Stage::PurchaseBuild, t1.duration_since(t0));
 
-    let signed = ex.sign(built)?;
+    let signed = {
+        let _g = tracing::trace_span!("sign").entered();
+        ex.sign(built)?
+    };
     let t2 = Instant::now();
     telemetry.record(Stage::PurchaseSign, t2.duration_since(t1));
 
-    let r = ex.send(signed).await;
+    use tracing::Instrument;
+    let r = ex
+        .send(signed)
+        .instrument(tracing::info_span!("send"))
+        .await;
     telemetry.record(Stage::PurchaseSendToAck, t2.elapsed());
     r
 }
 
+#[tracing::instrument(
+    name = "submit_limit_order",
+    skip_all,
+    fields(
+        venue = ?req.exchange,
+        side = ?req.side,
+        price_cents = req.price_cents,
+        qty_e8 = req.qty_sats,
+        reduce_only = req.reduce_only,
+        market = req.market,
+    ),
+)]
 pub async fn submit_limit_order(
     order: &ExecutorContext,
     telemetry: &Telemetry,
@@ -720,6 +744,18 @@ impl PurchaseManager {
         true
     }
 
+    #[tracing::instrument(
+        name = "submit_cross_legs",
+        skip_all,
+        fields(
+            buy_exch = ?route.buy_exchange,
+            sell_exch = ?route.sell_exchange,
+            buy_price_cents = route.buy_price,
+            sell_price_cents = route.sell_price,
+            profit_expect_bps = route.profit_expect,
+            qty_e8 = qty_sats,
+        ),
+    )]
     async fn submit_cross_legs(
         &mut self,
         route: &BuyExchangeSellExchange,
@@ -914,6 +950,16 @@ impl PurchaseManager {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "place_hedge_leg",
+        skip_all,
+        fields(
+            sell_exch = ?route.sell_exchange,
+            qty_e8 = qty_sats,
+            price_cents,
+            aggressive,
+        ),
+    )]
     async fn place_hedge_leg(
         &mut self,
         route: &BuyExchangeSellExchange,

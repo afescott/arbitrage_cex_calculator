@@ -13,6 +13,13 @@ csv = []
 dydx = []
 ## Bitget perps (mix) WS market data + HMAC REST execution.
 bitget = ["dep:hmac", "dep:sha2", "dep:hex", "dep:base64"]
+## OpenTelemetry OTLP/gRPC trace export (per-route execution spans → Jaeger).
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
 
 [dependencies]
 crossbeam-channel = "0.5"
@@ -43,6 +50,12 @@ rand = "0.8"
 pricelevel = "0.4.2"
 # In-process latency histograms for hot-path telemetry.
 hdrhistogram = "7"
+# OpenTelemetry stack (opt-in via `--features otel`). Versions chosen together to
+# match opentelemetry-rust 0.32 release train + tracing-opentelemetry 0.33.
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", optional = true, features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.32", optional = true, default-features = false, features = ["grpc-tonic", "trace"] }
+tracing-opentelemetry = { version = "0.33", optional = true }
 
 [profile.release]
 lto = true

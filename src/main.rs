@@ -15,8 +15,6 @@ use api::BitgetClient;
 use api::{CoinbaseClient, ExchangePrice, HyperliquidClient};
 #[cfg(feature = "dydx")]
 use api::DydxClient;
-use tracing::Level;
-use tracing_subscriber;
 
 use std::time::Duration;
 
@@ -40,14 +38,24 @@ async fn main() {
     run(pair, args).await;
 }
 async fn run(order_book_name: String, args: Args) {
-    // Initialize tracing for tokio-console compatibility
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .with_target(false)
-        .init();
+    // Sets up the global tracing subscriber. With `--features otel` this also installs
+    // the OTLP exporter; the guard flushes pending spans on drop so we keep it until
+    // after the shutdown path below.
+    let _tracing_guard = crate::telemetry::subscriber::init_subscriber();
 
-    // info!("Starting low-latency order book aggregator...");
-    // info!("Monitoring BTC/USDT pair across multiple exchanges");
+    // One always-on span at startup. Doubles as a smoke test that the export pipeline
+    // is alive — `submit_cross_legs` only fires when an arb is detected, which may not
+    // happen on short runs, but this span will land in Jaeger on every run.
+    tracing::info_span!(
+        "app_start",
+        pair = %order_book_name,
+        execute_live = args.execute_live,
+        hyperliquid_network = ?args.hyperliquid_network,
+    )
+    .in_scope(|| {
+        tracing::info!("starting low-latency arb engine");
+    });
+
     let (tx, rx) = tokio::sync::mpsc::channel::<ExchangePrice>(1000);
 
     // Spawn tasks for each exchange

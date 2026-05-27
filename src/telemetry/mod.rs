@@ -9,8 +9,14 @@
 //!
 //! Stage list (`Stage`) covers price-tick → order-ack on the hot path. Anything outside
 //! that path (shutdown flatten, etc.) is intentionally not timed here.
+//!
+//! Subscriber setup ([`init_subscriber`]) is also here so all tracing/observability
+//! plumbing lives in one place. With `--features otel`, traces are exported via OTLP
+//! gRPC to whatever `OTEL_EXPORTER_OTLP_ENDPOINT` points at (default `localhost:4317`).
 
 #![allow(dead_code)]
+
+pub mod subscriber;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
