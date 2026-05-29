@@ -157,11 +157,14 @@ async fn run(order_book_name: String, args: Args) {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let _telemetry_handle = crate::telemetry::spawn_reporter(
-        telemetry.clone(),
-        Duration::from_secs(5),
-        shutdown_rx.clone(),
-    );
+    // TEMP: reporter silenced so the one-shot kill-switch / HALT lines aren't buried
+    // under the 5s histogram dumps. Histograms still recording in `telemetry`; restore
+    // by uncommenting when debugging is done.
+    // let _telemetry_handle = crate::telemetry::spawn_reporter(
+    //     telemetry.clone(),
+    //     Duration::from_secs(5),
+    //     shutdown_rx.clone(),
+    // );
 
     let run_secs_limit = args.run_seconds.filter(|&s| s > 0);
 
@@ -194,7 +197,12 @@ async fn run(order_book_name: String, args: Args) {
     }
 
     let _ = shutdown_tx.send(true);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), purchase_handle).await;
+    // If the `select!` resolved via the `purchase_handle` arm, the JoinHandle is
+    // already completed; polling it again would panic with "JoinHandle polled after
+    // completion". Only wait when the purchase task is still running.
+    if !purchase_handle.is_finished() {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(15), purchase_handle).await;
+    }
 
     // Best-effort cleanup on shutdown.
     #[cfg(feature = "csv")]

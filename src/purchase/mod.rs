@@ -935,15 +935,26 @@ impl PurchaseManager {
         .await;
 
         if filled_qty > 0 {
+            // Submit-time failure on the hedge leg is still terminal: we don't know if
+            // the order was accepted by the venue, so blindly continuing could double
+            // up exposure if the original eventually fills server-side.
             if let Err(e) = &res_second {
                 return Err(format!(
                     "HALT: first leg filled_qty_e8={} on {:?} but hedge leg submit failed ({e:?}); refusing further orders.",
                     filled_qty, route.buy_exchange
                 ));
             }
+            // Partial / zero / unknown hedge fill: was HALT, now downgraded to a WARN.
+            // The per-venue position ledger (`hl_ledger` / `bitget_ledger`) keeps the
+            // running residual and the shutdown flatten path will close it out.
+            //
+            // TODO(option B): bound cumulative unhedged exposure. Sum the per-route
+            // residual (`filled_qty - leg2_filled_e8`) and re-HALT once it exceeds e.g.
+            // 1x route notional. Stops slow drift without killing the whole run on the
+            // first 6000-sat shortfall.
             if let Ok(ack) = &res_second {
                 if let Some(reason) = Self::hedge_fill_mismatch(filled_qty, route, ack) {
-                    return Err(reason);
+                    eprintln!("WARN: {reason}");
                 }
             }
         }
@@ -1030,6 +1041,10 @@ impl PurchaseManager {
     }
 
     /// Halt when leg1 filled but leg2 did not fully hedge (submit OK but zero/partial/unknown fill).
+    /// Returns a human-readable mismatch description when the hedge leg did not
+    /// fully cover leg1. Caller decides whether to halt or just log + continue —
+    /// today we log a `WARN` and rely on the per-venue ledger + shutdown flatten.
+    /// Residual `unhedged_e8 = leg1_filled - leg2_filled` (or full leg1 if unknown).
     fn hedge_fill_mismatch(
         leg1_filled: u64,
         route: &BuyExchangeSellExchange,
@@ -1037,16 +1052,17 @@ impl PurchaseManager {
     ) -> Option<String> {
         match leg2_ack.filled_qty_e8 {
             Some(0) => Some(format!(
-                "HALT: first leg filled_qty_e8={} on {:?}, hedge filled_qty_e8=0 on {:?}; refusing further orders.",
-                leg1_filled, route.buy_exchange, route.sell_exchange
+                "hedge mismatch: leg1 filled_qty_e8={} on {:?}, hedge filled_qty_e8=0 on {:?} (unhedged_e8={} stays on {:?})",
+                leg1_filled, route.buy_exchange, route.sell_exchange, leg1_filled, route.buy_exchange
             )),
             Some(hedge_filled) if hedge_filled < leg1_filled => Some(format!(
-                "HALT: first leg filled_qty_e8={} on {:?}, hedge filled_qty_e8={} on {:?}; refusing further orders.",
-                leg1_filled, route.buy_exchange, hedge_filled, route.sell_exchange
+                "hedge mismatch: leg1 filled_qty_e8={} on {:?}, hedge filled_qty_e8={} on {:?} (unhedged_e8={} stays on {:?})",
+                leg1_filled, route.buy_exchange, hedge_filled, route.sell_exchange,
+                leg1_filled - hedge_filled, route.buy_exchange
             )),
             None => Some(format!(
-                "HALT: first leg filled_qty_e8={} on {:?}, hedge fill unknown on {:?}; refusing further orders.",
-                leg1_filled, route.buy_exchange, route.sell_exchange
+                "hedge mismatch: leg1 filled_qty_e8={} on {:?}, hedge fill unknown on {:?} (treating as up to {} unhedged_e8 on {:?})",
+                leg1_filled, route.buy_exchange, route.sell_exchange, leg1_filled, route.buy_exchange
             )),
             _ => None,
         }
