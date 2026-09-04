@@ -8,13 +8,13 @@ mod sizing;
 mod telemetry;
 mod util;
 
-#[cfg(feature = "cex")]
-use api::{BinanceClient, KrakenClient};
 #[cfg(feature = "bitget")]
 use api::BitgetClient;
-use api::{CoinbaseClient, ExchangePrice, HyperliquidClient};
 #[cfg(feature = "dydx")]
 use api::DydxClient;
+#[cfg(feature = "cex")]
+use api::{BinanceClient, KrakenClient};
+use api::{CoinbaseClient, ExchangePrice, HyperliquidClient};
 
 use std::time::Duration;
 
@@ -66,8 +66,6 @@ async fn run(order_book_name: String, args: Args) {
             BinanceClient::new(binance_tx).listen_btc_usdt().await;
         })
     };
-    #[cfg(not(feature = "cex"))]
-    let _binance_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     #[cfg(feature = "cex")]
     let kraken_handle = {
@@ -112,8 +110,6 @@ async fn run(order_book_name: String, args: Args) {
                 .await;
         })
     };
-    #[cfg(not(feature = "dydx"))]
-    let _dydx_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     let (tx_purchase, rx_purchase) = tokio::sync::mpsc::channel(50);
 
@@ -131,12 +127,7 @@ async fn run(order_book_name: String, args: Args) {
     #[cfg(feature = "csv")]
     let csv_handle = {
         use std::path::PathBuf;
-        let path = args
-            .csv_path
-            .clone()
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let path = args.csv_path.clone().unwrap_or_default().trim().to_string();
         if path.is_empty() {
             None
         } else {
