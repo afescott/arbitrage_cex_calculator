@@ -206,6 +206,7 @@ impl OrderBook {
             sell_exchange: opportunity.sell_exchange,
             buy_exchange: opportunity.buy_exchange,
             t_emitted: Instant::now(),
+            tick_span: None,
         })
     }
 

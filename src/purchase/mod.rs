@@ -524,59 +524,72 @@ impl PurchaseManager {
                         self.flatten_all_positions().await;
                         return;
                     };
-                    self.telemetry
-                        .record(Stage::AggregatorToPurchase, route.t_emitted.elapsed());
-                    if !Self::sizing_ok(self.notional_usd_per_leg, &self.perp_symbol) {
-                        continue;
-                    }
 
-                    if self.execute_live && !live_trading_enabled {
-                        continue;
-                    }
-
-                    let Some(qty_sats) =
-                        sizing::qty_base_e8_from_notional(route.buy_price, self.notional_usd_per_leg)
-                    else {
-                        eprintln!(
-                            "Skipping route: could not size qty (buy_price_cents={}, notional={})",
-                            route.buy_price, self.notional_usd_per_leg
-                        );
-                        continue;
+                    let handoff_span = match route.tick_span.clone() {
+                        Some(parent) => {
+                            tracing::info_span!(parent: parent, "aggregator_to_purchase")
+                        }
+                        None => tracing::info_span!("aggregator_to_purchase"),
                     };
 
-                    println!(
-                        "Buying on {:?} at {} cents, selling on {:?} at {:?} cents",
-                        route.buy_exchange, route.buy_price, route.sell_exchange, route.sell_price
-                    );
-
-                    if hl::HyperliquidPurchase::route_hits_unsupported_kraken_legs(
-                        route.buy_exchange,
-                        route.sell_exchange,
-                    ) {
-                        println!("Kraken is not supported right now for the limit orders");
-                        continue;
-                    }
-
-                    if self.execute_live {
-                        if let Err(msg) = self.submit_cross_legs(&route, qty_sats).await {
-                            eprintln!("{msg}");
-                            eprintln!(
-                                "Live trading disabled; still draining routes so market-data feeds stay unblocked."
-                            );
-                            live_trading_enabled = false;
-                            if self.bump_route_count_and_maybe_stop().await {
-                                return;
-                            }
-                            continue;
+                    use tracing::Instrument;
+                    let should_stop = async {
+                        self.telemetry
+                            .record(Stage::AggregatorToPurchase, route.t_emitted.elapsed());
+                        if !Self::sizing_ok(self.notional_usd_per_leg, &self.perp_symbol) {
+                            return false;
                         }
-                    } else {
-                        println!(
-                            "DRY RUN (--execute-live=0): would LONG on {:?} and SHORT on {:?} (qty_e8={}, notional_usd_per_leg={})",
-                            route.buy_exchange, route.sell_exchange, qty_sats, self.notional_usd_per_leg
-                        );
-                    }
 
-                    if self.bump_route_count_and_maybe_stop().await {
+                        if self.execute_live && !live_trading_enabled {
+                            return false;
+                        }
+
+                        let Some(qty_sats) = sizing::qty_base_e8_from_notional(
+                            route.buy_price,
+                            self.notional_usd_per_leg,
+                        ) else {
+                            eprintln!(
+                                "Skipping route: could not size qty (buy_price_cents={}, notional={})",
+                                route.buy_price, self.notional_usd_per_leg
+                            );
+                            return false;
+                        };
+
+                        println!(
+                            "Buying on {:?} at {} cents, selling on {:?} at {:?} cents",
+                            route.buy_exchange, route.buy_price, route.sell_exchange, route.sell_price
+                        );
+
+                        if hl::HyperliquidPurchase::route_hits_unsupported_kraken_legs(
+                            route.buy_exchange,
+                            route.sell_exchange,
+                        ) {
+                            println!("Kraken is not supported right now for the limit orders");
+                            return false;
+                        }
+
+                        if self.execute_live {
+                            if let Err(msg) = self.submit_cross_legs(&route, qty_sats).await {
+                                eprintln!("{msg}");
+                                eprintln!(
+                                    "Live trading disabled; still draining routes so market-data feeds stay unblocked."
+                                );
+                                live_trading_enabled = false;
+                                return self.bump_route_count_and_maybe_stop().await;
+                            }
+                        } else {
+                            println!(
+                                "DRY RUN (--execute-live=0): would LONG on {:?} and SHORT on {:?} (qty_e8={}, notional_usd_per_leg={})",
+                                route.buy_exchange, route.sell_exchange, qty_sats, self.notional_usd_per_leg
+                            );
+                        }
+
+                        self.bump_route_count_and_maybe_stop().await
+                    }
+                    .instrument(handoff_span)
+                    .await;
+
+                    if should_stop {
                         return;
                     }
                 }

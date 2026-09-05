@@ -39,7 +39,15 @@ fn book_exchange_of(price: &ExchangePrice) -> book::Exchange {
     }
 }
 
+fn duration_as_ns(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// Apply one exchange price update: arbitrage check, then merge into the book.
+///
+/// OTel/`tracing` spans (`tick` → `arb_detect` / `book_update`) are created only when a route
+/// is emitted, so Jaeger stays focused on arb ticks. Histogram `Stage` records still run on
+/// every tick.
 fn apply_exchange_price_update(
     orderbook: &book::OrderBook,
     telemetry: &Telemetry,
@@ -50,7 +58,8 @@ fn apply_exchange_price_update(
     received_at: Instant,
     tx: &tokio::sync::mpsc::Sender<BuyExchangeSellExchange>,
 ) {
-    telemetry.record(Stage::WsToAggregator, received_at.elapsed());
+    let ws_elapsed = received_at.elapsed();
+    telemetry.record(Stage::WsToAggregator, ws_elapsed);
 
     let orderbook_side = match side {
         ApiSide::Buy => PriceLevelSide::Buy,
@@ -60,10 +69,30 @@ fn apply_exchange_price_update(
     let t_arb = Instant::now();
     let maybe_route =
         orderbook.check_for_immediate_purchase(price, exchange, orderbook_side, quantity);
-    telemetry.record(Stage::ArbDetect, t_arb.elapsed());
+    let arb_elapsed = t_arb.elapsed();
+    telemetry.record(Stage::ArbDetect, arb_elapsed);
 
-    if let Some(route) = maybe_route {
+    if let Some(mut route) = maybe_route {
+        let tick_span = tracing::info_span!(
+            "tick",
+            exchange = ?exchange,
+            price,
+            side = ?side,
+            ws_to_aggregator_ns = duration_as_ns(ws_elapsed),
+        );
+        let _tick = tick_span.enter();
+
+        // Detect already ran; record true elapsed as a field (Jaeger wall time for this child ≈ 0).
+        {
+            let _arb = tracing::info_span!(
+                "arb_detect",
+                elapsed_ns = duration_as_ns(arb_elapsed),
+            )
+            .entered();
+        }
+
         telemetry.n_arb_found.fetch_add(1, Ordering::Relaxed);
+        route.tick_span = Some(tick_span.clone());
         // Never block the aggregator on a slow purchase loop; drop stale routes instead.
         match tx.try_send(route) {
             Ok(()) => {
@@ -84,6 +113,15 @@ fn apply_exchange_price_update(
                 eprintln!("purchase route channel closed");
             }
         }
+
+        let t_book = Instant::now();
+        {
+            let _book = tracing::info_span!("book_update").entered();
+            orderbook.add_exchange_price_level(price, exchange, orderbook_side, quantity);
+        }
+        telemetry.record(Stage::BookUpdate, t_book.elapsed());
+        telemetry.n_book_updates.fetch_add(1, Ordering::Relaxed);
+        return;
     }
 
     let t_book = Instant::now();

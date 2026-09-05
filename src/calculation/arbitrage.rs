@@ -73,7 +73,10 @@ impl ArbitrageOpportunity {
 }
 
 /// Route snapshot for downstream fee / execution logic. Prices are in cents; `profit_expect` is basis points.
-#[derive(Debug, Clone, Copy)]
+///
+/// Not `Copy`: optional [`tracing::Span`] carries the aggregator's `tick` parent across the
+/// mpsc handoff so Jaeger can nest `aggregator_to_purchase` → `submit_cross_legs`.
+#[derive(Debug, Clone)]
 pub struct BuyExchangeSellExchange {
     pub buy_price: u64,
     pub profit_expect: u64,
@@ -83,6 +86,8 @@ pub struct BuyExchangeSellExchange {
     /// Monotonic timestamp set the moment `check_for_immediate_purchase` decides this route is
     /// emittable. Used by `PurchaseManager` to record the aggregator→purchase channel latency.
     pub t_emitted: Instant,
+    /// Parent `tick` span from the aggregator (set only when a route is emitted).
+    pub tick_span: Option<tracing::Span>,
 }
 
 /// Arbitrage detection logic
