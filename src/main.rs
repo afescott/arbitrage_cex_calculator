@@ -40,12 +40,12 @@ async fn main() {
 async fn run(order_book_name: String, args: Args) {
     // Sets up the global tracing subscriber. With `--features otel` this also installs
     // the OTLP exporter; the guard flushes pending spans on drop so we keep it until
-    // after the shutdown path below.
+    // after the shutdown path below
     let _tracing_guard = crate::telemetry::subscriber::init_subscriber();
 
     // One always-on span at startup. Doubles as a smoke test that the export pipeline
     // is alive — `submit_cross_legs` only fires when an arb is detected, which may not
-    // happen on short runs, but this span will land in Jaeger on every run.
+    // happen on short runs
     tracing::info_span!(
         "app_start",
         pair = %order_book_name,
@@ -60,7 +60,7 @@ async fn run(order_book_name: String, args: Args) {
 
     // Spawn tasks for each exchange
     #[cfg(feature = "cex")]
-    let binance_handle = {
+    let _binance_handle = {
         let binance_tx = tx.clone();
         tokio::spawn(async move {
             BinanceClient::new(binance_tx).listen_btc_usdt().await;
@@ -68,14 +68,12 @@ async fn run(order_book_name: String, args: Args) {
     };
 
     #[cfg(feature = "cex")]
-    let kraken_handle = {
+    let _kraken_handle = {
         let kraken_tx = tx.clone();
         tokio::spawn(async move {
             KrakenClient::new(kraken_tx).listen_btc_usdt().await;
         })
     };
-    #[cfg(not(feature = "cex"))]
-    let _kraken_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     let coinbase_tx = tx.clone();
     let _coinbase_handle = tokio::spawn(async move {
@@ -89,8 +87,6 @@ async fn run(order_book_name: String, args: Args) {
             BitgetClient::new(bitget_tx).listen_btc_usdt().await;
         })
     };
-    #[cfg(not(feature = "bitget"))]
-    let bitget_handle = tokio::spawn(async { std::future::pending::<()>().await });
 
     let hyperliquid_tx = tx.clone();
     let hyperliquid_network = args.hyperliquid_network.clone();
@@ -101,7 +97,7 @@ async fn run(order_book_name: String, args: Args) {
     });
 
     #[cfg(feature = "dydx")]
-    let dydx_handle = {
+    let _dydx_handle = {
         let dydx_tx = tx.clone();
         let dydx_network = args.dydx_network.clone();
         tokio::spawn(async move {
