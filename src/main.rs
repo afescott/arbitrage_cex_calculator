@@ -144,14 +144,13 @@ async fn run(order_book_name: String, args: Args) {
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // TEMP: reporter silenced so the one-shot kill-switch / HALT lines aren't buried
-    // under the 5s histogram dumps. Histograms still recording in `telemetry`; restore
-    // by uncommenting when debugging is done.
-    // let _telemetry_handle = crate::telemetry::spawn_reporter(
-    //     telemetry.clone(),
-    //     Duration::from_secs(5),
-    //     shutdown_rx.clone(),
-    // );
+    // Periodic stderr dump of counters + per-stage p50/p99 (final snapshot on shutdown).
+    // Copy the last block into docs/runs/<run>.csv when baselining — see docs/runs/README.md.
+    let _telemetry_handle = crate::telemetry::spawn_reporter(
+        telemetry.clone(),
+        Duration::from_secs(5),
+        shutdown_rx.clone(),
+    );
 
     let run_secs_limit = args.run_seconds.filter(|&s| s > 0);
 

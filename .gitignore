@@ -1,5 +1,8 @@
 /target
-/docs
+# Private notes / CVs under docs/; keep run baselines trackable.
+/docs/**
+!/docs/runs/
+!/docs/runs/**
 /src/calculation
 /examples
 /dydx-relay/node_modules
